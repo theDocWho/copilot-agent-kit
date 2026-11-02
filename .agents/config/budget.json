@@ -1,16 +1,28 @@
 {
   "_comment": "Resource + request budgets. Edit freely. All tools read this file at startup.",
-
   "memory": {
     "total_mb": 4096,
     "vscode_soft_limit_mb": 2560,
     "worker_mb": 1024,
     "pause_at_pct": 90,
     "resume_at_pct": 75,
-    "vscode_process_names": ["Code.exe", "code", "Code", "Code Helper", "Code Helper (Renderer)", "Code Helper (Plugin)", "Code Helper (GPU)", "Code - Insiders", "Code - Insiders.exe", "code-insiders", "electron"],
-    "_note": "total_mb = VS Code (all processes) + every worker started by the agents. Workers get worker_mb; when the total crosses pause_at_pct the crawler pauses and the guard hook refuses new subagents until it drops below resume_at_pct."
+    "vscode_process_names": [
+      "Code.exe",
+      "code",
+      "Code",
+      "Code Helper",
+      "Code Helper (Renderer)",
+      "Code Helper (Plugin)",
+      "Code Helper (GPU)",
+      "Code - Insiders",
+      "Code - Insiders.exe",
+      "code-insiders",
+      "electron"
+    ],
+    "_note": "total_mb = VS Code (all processes) + every worker started by the agents. Workers get worker_mb; when the total crosses pause_at_pct the crawler pauses and next-wave stops dispatching until it drops below resume_at_pct. If memory cannot be measured at all (no psutil, ctypes blocked), the static_* limits apply instead.",
+    "static_max_parallel_subagents": 2,
+    "static_crawl_concurrency": 2
   },
-
   "crawl": {
     "start_concurrency": 4,
     "max_concurrency": 8,
@@ -23,14 +35,12 @@
     "render_restart_every": 40,
     "user_agent": "Mozilla/5.0 (compatible; workspace-research-bot/1.0)"
   },
-
   "batching": {
     "chars_per_token": 4,
     "max_tokens_per_batch": 30000,
     "max_files_per_batch": 12,
     "reduce_when_digest_tokens_over": 40000
   },
-
   "agents": {
     "max_parallel_subagents": 3,
     "max_requests_setting": 150,

@@ -11,14 +11,17 @@
   "chat.subagents.useRichRendering": false,              // inline, not one editor per subagent -> less memory
   "chat.subagents.showCreditUsage": true,                // see AI credits per subagent
 
-  // ---- Hooks (guard + telemetry in .github/hooks/agent-kit.json) --------------------
+  // ---- Hooks: OPTIONAL. Many orgs lock these off by policy; the kit does not need them
+  // (memguard.py = safety check + memory cap, ledger.py next-wave = memory gate).
   "chat.useHooks": true,
   "chat.useCustomAgentHooks": true,
 
   // ---- Approvals (used when you are NOT in "Allow all") --------------------------------
+  // Safer than "Allow all" when hooks are off: kit scripts (incl. memguard, which checks
+  // every command it runs) are auto-approved; anything run directly still asks you.
+  // Rules match each subcommand, so "kit.py; rm -rf x" still needs your approval.
   "chat.tools.terminal.autoApprove": {
-    "/^python3? \\.agents\\/tools\\//": true,
-    "/^python3? \\.agents\\\\tools\\\\/": true,
+    "/^(python3?|py(\\s+-3(\\.\\d+)?)?) \\.agents[\\\\/]tools[\\\\/]\\w+\\.py\\b/": true,
     "git status": true,
     "git diff": true,
     "git log": true

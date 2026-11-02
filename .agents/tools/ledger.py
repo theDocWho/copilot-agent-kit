@@ -25,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (STATE, budget, file_lock, fmt_usd, load_json, memory_snapshot,  # noqa: E402
-                    model_for_agent, now_iso, pricing, rel, save_json, turn_budget_calls, unit_cost)
+                    model_for_agent, now_iso, pricing, rel, save_json, static_limits, turn_budget_calls, unit_cost)
 
 AGENTS_OK = {"Fetcher", "Implementer", "Reviewer", "Planner"}
 DONE = {"done", "skipped"}
@@ -262,7 +262,10 @@ def cmd_turn_start(a):
     t = mutate(fn)
     mem = memory_snapshot()
     print(f"TURN {t['n']} budget={t['budget']} tool calls (orchestrator + subagents). memory={mem['state']}"
-          f" vscode={mem['vscode_mb']}MB workers={mem['workers_mb']}MB used={mem['used_pct']}%")
+          f" ({mem['backend']}) vscode={mem['vscode_mb']}MB workers={mem['workers_mb']}MB used={mem['used_pct']}%")
+    if mem["state"] == "UNMEASURED":
+        print(f"MEMORY_UNMEASURED: no way to read process memory here; using static limits "
+              f"({static_limits()['parallel']} subagents per wave). Prefer new chats per phase.")
     if mem["vscode_over_soft_limit"]:
         print("NEW_SESSION_RECOMMENDED: VS Code is over its soft memory limit. Finish this wave, then tell the user to open a new chat and run /next-wave.")
 
@@ -273,6 +276,8 @@ def cmd_next_wave(a):
     max_par = a.max_parallel or ab.get("max_parallel_subagents", 3)
     orch_cost = ab.get("orchestrator_calls_per_wave", 6)
     mem = memory_snapshot()
+    if mem["state"] == "UNMEASURED":
+        max_par = min(max_par, static_limits()["parallel"])
 
     def fn(led):
         units = led["units"]

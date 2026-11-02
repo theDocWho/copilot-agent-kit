@@ -45,7 +45,7 @@ from urllib.parse import urldefrag, urljoin, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (CACHE, STATE, append_jsonl, auth_header_from_env, budget, memory_snapshot,  # noqa: E402
-                    now_iso, register_worker, rel, self_tree_mb, unregister_worker)
+                    now_iso, register_worker, rel, self_tree_mb, static_limits, unregister_worker)
 
 SKIP_TAGS = {"script", "style", "noscript", "svg", "canvas", "template", "iframe", "head"}
 BLOCK_TAGS = {"p", "div", "section", "article", "li", "tr", "br", "h1", "h2", "h3", "h4", "h5", "h6",
@@ -336,6 +336,8 @@ class Crawler:
                 gc.collect()
             elif mine < 0.5 * self.worker_mb and self.conc < self.cfg["max_concurrency"]:
                 self.conc += 1
+        if mine is None:  # memory not measurable -> fixed conservative concurrency
+            self.conc = min(self.conc, static_limits()["concurrency"])
         snap["self_mb"] = round(mine, 0) if mine is not None else None
         return snap
 

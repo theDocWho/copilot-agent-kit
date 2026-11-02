@@ -10,7 +10,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import ROOT, budget, memory_snapshot, psutil  # noqa: E402
+import memprobe  # noqa: E402
+from common import ROOT, budget, deny_reason, memory_snapshot, psutil  # noqa: E402
 
 ok = True
 
@@ -26,8 +27,19 @@ def warn(msg: str):
 
 
 print(f"agent kit doctor — workspace {ROOT}")
-check(sys.version_info >= (3, 9), f"python {sys.version.split()[0]} (need 3.9+)")
-check(psutil is not None, "psutil installed (memory measurement + caps)", "pip install psutil")
+check(sys.version_info >= (3, 9), f"python {sys.version.split()[0]} (need 3.9+; 3.13 tested)")
+be = memprobe.backend()
+if be == "none":
+    warn("memory NOT measurable (" + "; ".join(memprobe.backend_errors()) + ") -> static limits from budget.json "
+         "memory.static_* will be used. Try `pip install psutil`.")
+else:
+    print(f"  OK   memory measurement via {be}" + ("" if psutil else " (psutil not installed; built-in fallback in use)"))
+if sys.platform == "win32":
+    try:
+        j = memprobe.WinJob(64 * 1_048_576); j.close()
+        print("  OK   Windows Job Objects available (memguard hard memory cap)")
+    except Exception as e:  # noqa: BLE001
+        warn(f"Job Objects unavailable ({e}); memguard will poll and kill instead")
 check(shutil.which("git") is not None, "git on PATH (Reviewer uses git diff)")
 try:
     import pypdf  # noqa: F401
@@ -37,11 +49,12 @@ except ImportError:
 for a in ("orchestrator", "planner", "fetcher", "implementer", "reviewer", "monitor"):
     f = ROOT / ".github" / "agents" / f"{a}.agent.md"
     check(f.exists(), f".github/agents/{a}.agent.md")
-check((ROOT / ".github" / "hooks" / "agent-kit.json").exists(), ".github/hooks/agent-kit.json")
-r = subprocess.run([sys.executable, str(Path(__file__).with_name("hooks.py")), "preToolUse"],
-                   input='{"toolName":"runInTerminal","toolArgs":{"command":"git push --force"}}',
+check(deny_reason("git push --force origin main") is not None, "memguard safety check blocks a force-push (works without hooks)")
+r = subprocess.run([sys.executable, str(Path(__file__).with_name("memguard.py")), "--", sys.executable, "-c", "print('ok')"],
                    capture_output=True, text=True)
-check('"deny"' in r.stdout, "guard hook blocks a force-push (dry run)")
+check(r.returncode == 0 and "ok" in r.stdout, "memguard runs a command")
+print("  INFO hooks are optional. If your org disables them, the guard and memory gate still work through "
+      "memguard.py and ledger.py; only the extra per-tool telemetry is lost.")
 
 settings = ROOT / ".vscode" / "settings.json"
 b = budget()
@@ -53,7 +66,8 @@ if settings.exists():
         want = b.get("agents", {}).get("max_requests_setting")
         check(mr == want, f"chat.agent.maxRequests ({mr}) == budget.json agents.max_requests_setting ({want})",
               "make them equal, or the turn budget is computed wrong")
-        check(s.get("chat.useHooks") is True, "chat.useHooks enabled")
+        if s.get("chat.agent.maxRequests") is None:
+            warn("chat.agent.maxRequests not set in workspace settings")
     except json.JSONDecodeError:
         warn(".vscode/settings.json could not be parsed (comments?) — check maxRequests manually")
 else:

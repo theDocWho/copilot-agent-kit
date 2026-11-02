@@ -7,7 +7,8 @@
 
 How "actual" is measured (best available source wins):
   1. --usage-csv: GitHub billing usage report for the task's time window = billed truth.
-  2. Hook log (.agents/state/hooks.jsonl): real tool-call counts per unit time window.
+  2. Logged calls: kit scripts log every invocation to .agents/state/calls.jsonl, plus the
+     hook log if your org allows hooks; counted per unit time window (terminal calls only).
   3. Self-reported calls/chars from `ledger.py finish`.
 Tokens for 2 and 3 use the same cost model as the estimate (common.unit_cost), so the
 delta isolates how far the plan's call counts and context sizes were off.
@@ -83,7 +84,11 @@ def report(a):
     pr, b = pricing(), budget()
     cpt = b.get("batching", {}).get("chars_per_token", 4)
     units = list(led["units"].values())
+    # hooks.jsonl exists only if hooks are allowed; calls.jsonl is written by the kit's own scripts
     hk = hook_calls(units, read_jsonl(STATE / "hooks.jsonl"))
+    kc = hook_calls(units, [dict(e, event="preToolUse") for e in read_jsonl(STATE / "calls.jsonl")])
+    for k, v in kc.items():
+        hk[k] = max(hk.get(k, 0), v)
     rows, by_model = [], {}
     for u in sorted(units, key=lambda x: x["id"]):
         mk = model_for_agent(u["agent"], pr)
@@ -94,9 +99,9 @@ def report(a):
             calls, src = ac.get("calls", 0), "self"
             h = round(hk.get(u["id"], 0), 1)
             if h > calls:  # conservative: trust whichever source saw more tool calls
-                calls, src = h, "hooks"
+                calls, src = h, "logged"
             elif h:
-                src = f"self; hooks {h}"
+                src = f"self; logged {h}"
             work = (ac.get("read_chars", 0) + ac.get("wrote_chars", 0)) / cpt
             act = unit_cost(mk, calls, work, ac.get("wrote_chars", 0) / cpt, pr)
         rows.append((u, mk, est, act, calls, src))
@@ -109,11 +114,12 @@ def report(a):
     # orchestrator overhead (expected: per wave; actual: logged turns)
     waves = len(led.get("waves", []))
     ocw = b.get("agents", {}).get("orchestrator_calls_per_wave", 6)
-    o_est = unit_cost("opus", max(1, waves) * ocw, 8000, 1500 * max(1, waves), pr)
+    om = model_for_agent("Orchestrator", pr)
+    o_est = unit_cost(om, max(1, waves) * ocw, 8000, 1500 * max(1, waves), pr)
     o = led.get("orch", [])
-    o_act = unit_cost("opus", sum(x["calls"] for x in o), sum(x["read_chars"] + x["wrote_chars"] for x in o) / cpt,
+    o_act = unit_cost(om, sum(x["calls"] for x in o), sum(x["read_chars"] + x["wrote_chars"] for x in o) / cpt,
                       sum(x["wrote_chars"] for x in o) / cpt, pr) if o else None
-    bm = by_model.setdefault("opus", {"est": 0.0, "act": 0.0, "est_done": 0.0})
+    bm = by_model.setdefault(om, {"est": 0.0, "act": 0.0, "est_done": 0.0})
     bm["est"] += o_est["usd"]
     if o_act:
         bm["act"] += o_act["usd"]
@@ -132,7 +138,7 @@ def report(a):
         d = f"{(act['usd'] - est['usd']) / est['usd'] * 100:+.0f}%" if act and est["usd"] else ""
         L.append(f"| {u['id']} | {u['agent']} | {mk} | {u['est']['calls']} | {calls if act else '-'} ({src}) | "
                  f"{fmt_usd(est['usd'])} | {fmt_usd(act['usd']) if act else '-'} | {d} |")
-    L.append(f"| orchestrator | Orchestrator | opus | {max(1, waves) * ocw} | {sum(x['calls'] for x in o) if o else '-'} (self) | "
+    L.append(f"| orchestrator | Orchestrator | {om} | {max(1, waves) * ocw} | {sum(x['calls'] for x in o) if o else '-'} (self) | "
              f"{fmt_usd(o_est['usd'])} | {fmt_usd(o_act['usd']) if o_act else '-'} | |")
     L += ["", "| model | expected (all) | expected (finished) | actual~ (finished) |", "|---|---|---|---|"]
     for mk, v in sorted(by_model.items()):

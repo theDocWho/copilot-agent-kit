@@ -31,8 +31,10 @@ def build(brief: bool) -> list[str]:
     mem = memory_snapshot()
     hooks = read_jsonl(STATE / "hooks.jsonl", tail=2000)
     now = time.time()
-    calls10 = sum(1 for e in hooks if str(e.get("event", "")).lower() == "pretooluse" and now - e.get("t", 0) < 600)
-    last_evt = max((e.get("t", 0) for e in hooks), default=0)
+    kit = read_jsonl(STATE / "calls.jsonl", tail=2000)  # written by the kit itself (no hooks needed)
+    calls10 = sum(1 for e in hooks if str(e.get("event", "")).lower() == "pretooluse" and now - e.get("t", 0) < 600) \
+        + sum(1 for e in kit if now - e.get("t", 0) < 600)
+    last_evt = max([e.get("t", 0) for e in hooks] + [e.get("t", 0) for e in kit] + [0])
 
     if not a.get("task_id"):
         L.append("No active task. Start one with /run-task.")
@@ -51,8 +53,8 @@ def build(brief: bool) -> list[str]:
         running = [u for u in units if u["status"] in ("running", "queued")]
         for u in running[: (3 if brief else 20)]:
             L.append(f"  ▶ {u['id']} {u['agent']} {u['status']} {ago(parse_iso(u.get('started') or u.get('queued')))} — {u['title'][:60]}")
-        if running and last_evt and now - last_evt > 600:
-            L.append(f"  ⚠ STALLED? no agent tool activity for {ago(last_evt)} while units are running "
+        if running and last_evt and now - last_evt > 900:
+            L.append(f"  ⚠ STALLED? no logged agent activity for {ago(last_evt)} while units are running "
                      "(chat may be waiting on 'Continue' or a question)")
         pend = [q for q in led.get("questions", []) if not q.get("answer")]
         if pend:
@@ -86,12 +88,12 @@ def build(brief: bool) -> list[str]:
         e = ev[-1]
         last = parse_iso(e.get("ts"))
         live = last and now - last < 30 and e.get("event") != "slice_end"
-        L.append(f"crawl {pf.stem[6:]}: {'RUNNING' if live else e.get('status', 'idle')} done={e.get('done')} "
+        L.append(f"crawl {pf.stem[6:]}: {'RUNNING' if live else e.get('status', 'idle')} done={e.get('done', e.get('page_parts'))} "
                  f"queued={e.get('queued')} failed={e.get('failed')} rate={e.get('rate_pps', '-')}/s ({ago(last)} ago)")
     L.append(f"memory: {mem['state']} — VS Code {mem['vscode_mb']}MB + workers {mem['workers_mb']}MB = "
              f"{mem['used_pct']}% of {mem['total_budget_mb']}MB" + ("  ⚠ open a NEW chat to free VS Code memory" if mem["vscode_over_soft_limit"] else "")
-             + ("" if mem["psutil"] else "  (pip install psutil to measure)"))
-    L.append(f"activity: {calls10} tool calls in last 10 min, last event {ago(last_evt)} ago")
+             + (f"  [via {mem['backend']}]" if mem["state"] != "UNMEASURED" else "  [not measurable here: static limits in use]"))
+    L.append(f"activity: {calls10} logged tool calls in last 10 min, last event {ago(last_evt)} ago")
     return L
 
 

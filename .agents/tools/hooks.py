@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Copilot hook handler (wired in .github/hooks/agent-kit.json).
+"""Copilot hook handler (wired in .github/hooks/agent-kit.json). OPTIONAL: if your org disables
+hooks, the same deny list is enforced by memguard.py and memory gating by ledger.py next-wave.
 
   hooks.py preToolUse     -> guard: block destructive commands, block new subagents when
                              memory is over budget, block bulk web/fetch (use crawl.py), log
@@ -18,19 +19,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-DENY_CMD = [
-    (r"\brm\s+-[a-z]*r[a-z]*f?\s+(/|~|\*|\.\.?|\$HOME)/?(\s|$|;|&)", "recursive delete of root/home/cwd"),
-    (r"\bRemove-Item\b.*-Recurse.*\s([A-Z]:\\?|~|\\)(\s|$)", "recursive delete of a drive/home"),
-    (r"\b(del|erase)\s+/s\b", "recursive delete"),
-    (r"\bgit\s+push\b.*(--force|-f)\b", "force push"),
-    (r"\bgit\s+(reset\s+--hard|clean\s+-[a-z]*f)", "discarding local work"),
-    (r"(^|[;&|]\s*)\s*(format\s+[a-z]:|mkfs|diskpart|shutdown|reboot)\b", "system-level command"),
-    (r"(curl|wget|iwr|Invoke-WebRequest)[^|]*\|\s*(sh|bash|iex|powershell)", "piping a download into a shell"),
-    (r"(echo|printf|Write-(Output|Host)|cat|type)\b.*\$(env:)?\{?\w*(TOKEN|SECRET|PASSWORD|PASSWD|COOKIE|API_?KEY|CREDENTIAL)",
-     "printing a secret into the chat context"),
-    (r"(^|[;&|]\s*)\s*(printenv|env|set|Get-ChildItem\s+env:|gci\s+env:|dir\s+env:)\s*($|[;&|])",
-     "dumping all environment variables (may contain secrets)"),
-]
 BULK_FETCH_LIMIT = 8          # web/fetch calls allowed per 10 minutes before forcing crawl.py
 BULK_FETCH_WINDOW = 600
 
@@ -51,7 +39,7 @@ def main():
         data = json.loads(raw) if raw.strip() else {}
     except Exception:
         data = {}
-    from common import STATE, append_jsonl, budget, load_json, memory_snapshot, now_iso, read_jsonl, save_json
+    from common import STATE, append_jsonl, deny_reason, load_json, memory_snapshot, now_iso, read_jsonl, save_json
 
     tool = data.get("toolName") or data.get("tool_name") or ""
     args = data.get("toolArgs", data.get("tool_input", ""))
@@ -77,10 +65,10 @@ def main():
     tl = tool.lower()
     # 1) destructive terminal commands (we run with "Allow all", so this is the safety net)
     if any(k in tl for k in ("terminal", "bash", "shell", "execute", "powershell")):
-        for pat, why in DENY_CMD:
-            if re.search(pat, cmd_s, re.I | re.M):
-                deny(f"Blocked by agent-kit guard: {why}. Ask the user to run it manually if it is really intended.")
-                return
+        why = deny_reason(cmd_s)
+        if why:
+            deny(f"Blocked by agent-kit guard: {why}. Ask the user to run it manually if it is really intended.")
+            return
 
     # 2) memory gate for new subagents
     if "subagent" in tl or tl in ("agent", "task", "runsubagent"):

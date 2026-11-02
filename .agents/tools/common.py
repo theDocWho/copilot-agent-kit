@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-try:  # optional
+try:  # optional; memprobe has fallbacks for every OS
     import psutil  # type: ignore
 except Exception:  # pragma: no cover
     psutil = None
@@ -154,65 +154,45 @@ def turn_budget_calls(b: dict | None = None) -> int:
 
 
 # ---------------------------------------------------------------- memory
-def _tree_rss(proc) -> int:
-    total = 0
-    try:
-        procs = [proc] + proc.children(recursive=True)
-    except Exception:
-        procs = [proc]
-    for p in procs:
-        try:
-            total += p.memory_info().rss
-        except Exception:
-            pass
-    return total
+# memprobe works without psutil (Windows ctypes / tasklist, Linux /proc, macOS ps).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import memprobe  # noqa: E402
 
 
 def self_tree_mb() -> float | None:
-    if not psutil:
-        return None
-    return _tree_rss(psutil.Process(os.getpid())) / 1_048_576
+    b = memprobe.tree_bytes(os.getpid())
+    return None if b is None else b / 1_048_576
 
 
 def pid_tree_mb(pid: int) -> float | None:
-    if not psutil:
-        return None
-    try:
-        return _tree_rss(psutil.Process(pid)) / 1_048_576
-    except Exception:
-        return None
+    b = memprobe.tree_bytes(pid)
+    return None if b is None else b / 1_048_576
 
 
 def vscode_mb(names: list[str] | None = None) -> float | None:
-    """Sum RSS of all VS Code / Electron processes (renderer, ext host, helpers)."""
-    if not psutil:
-        return None
+    """Sum memory of all VS Code / Electron processes (renderer, extension host, helpers)."""
     names = names or budget().get("memory", {}).get("vscode_process_names", [])
-    wanted = {n.lower() for n in names}
-    total = 0
-    for p in psutil.process_iter(["name", "memory_info"]):
-        try:
-            n = (p.info.get("name") or "").lower()
-            if n in wanted or n.startswith("code helper"):
-                mi = p.info.get("memory_info")
-                if mi:
-                    total += mi.rss
-        except Exception:
-            pass
-    return total / 1_048_576
+    b = memprobe.names_bytes(names)
+    return None if b is None else b / 1_048_576
 
 
-def workers_mb() -> float:
-    """RSS of worker processes registered in state/workers.json (alive only)."""
+def workers_mb() -> float | None:
+    """Memory of worker processes registered in state/workers.json (alive only)."""
     reg = load_json(STATE / "workers.json", {}) or {}
+    procs = memprobe.list_procs()
+    if procs is None:
+        return None
+    live = {p for p, *_ in procs}
     total, alive = 0.0, {}
     for pid, meta in reg.items():
-        mb = pid_tree_mb(int(pid))
-        if mb is not None:
-            total += mb
+        if int(pid) in live:
+            total += (memprobe.tree_bytes(int(pid)) or 0) / 1_048_576
             alive[pid] = meta
-    if psutil and len(alive) != len(reg):
-        save_json(STATE / "workers.json", alive)
+    if len(alive) != len(reg):
+        try:
+            save_json(STATE / "workers.json", alive)
+        except OSError:
+            pass
     return total
 
 
@@ -231,17 +211,21 @@ def unregister_worker(pid: int) -> None:
 
 
 def memory_snapshot() -> dict:
+    """state: OK / WARN / PAUSE, or UNMEASURED when no backend can read memory
+    (then every tool falls back to the static limits in budget.json memory.static_*)."""
     m = budget().get("memory", {})
     total_budget = m.get("total_mb", 4096)
     vs = vscode_mb(m.get("vscode_process_names"))
-    wk = workers_mb() if psutil else None
+    wk = workers_mb()
+    measurable = vs is not None
     used = (vs or 0) + (wk or 0)
-    pct = round(100 * used / total_budget, 1) if psutil else None
-    state = "unknown"
-    if pct is not None:
+    pct = round(100 * used / total_budget, 1) if measurable else None
+    if pct is None:
+        state = "UNMEASURED"
+    else:
         state = "PAUSE" if pct >= m.get("pause_at_pct", 90) else ("WARN" if pct >= m.get("resume_at_pct", 75) else "OK")
     return {
-        "psutil": bool(psutil),
+        "backend": memprobe.backend(),
         "vscode_mb": round(vs, 0) if vs is not None else None,
         "workers_mb": round(wk, 0) if wk is not None else None,
         "total_budget_mb": total_budget,
@@ -249,6 +233,44 @@ def memory_snapshot() -> dict:
         "state": state,
         "vscode_over_soft_limit": bool(vs and vs > m.get("vscode_soft_limit_mb", 2560)),
     }
+
+
+def static_limits() -> dict:
+    """Conservative limits used when memory cannot be measured."""
+    m = budget().get("memory", {})
+    return {"parallel": m.get("static_max_parallel_subagents", 2), "concurrency": m.get("static_crawl_concurrency", 2)}
+
+
+# ---------------------------------------------------------------- command guard (works without hooks)
+DENY_CMD = [
+    (r"\brm\s+-[a-z]*r[a-z]*f?\s+(/|~|\*|\.\.?|\$HOME)/?(\s|$|;|&)", "recursive delete of root/home/cwd"),
+    (r"\bRemove-Item\b.*-Recurse.*\s([A-Z]:\\?|~|\\)(\s|$)", "recursive delete of a drive/home"),
+    (r"\b(del|erase|rd|rmdir)\s+/s\b", "recursive delete"),
+    (r"\bgit\s+push\b.*(--force|-f)\b", "force push"),
+    (r"\bgit\s+(reset\s+--hard|clean\s+-[a-z]*f)", "discarding local work"),
+    (r"(^|[;&|]\s*)\s*(format\s+[a-z]:|mkfs|diskpart|shutdown|reboot|Stop-Computer|Restart-Computer)\b", "system-level command"),
+    (r"(curl|wget|iwr|Invoke-WebRequest|irm)[^|]*\|\s*(sh|bash|iex|powershell|pwsh)", "piping a download into a shell"),
+    (r"(echo|printf|Write-(Output|Host)|cat|type)\b.*\$(env:)?\{?\w*(TOKEN|SECRET|PASSWORD|PASSWD|COOKIE|API_?KEY|CREDENTIAL)",
+     "printing a secret into the chat context"),
+    (r"(^|[;&|]\s*)\s*(printenv|env|set|Get-ChildItem\s+env:|gci\s+env:|dir\s+env:)\s*($|[;&|])",
+     "dumping all environment variables (may contain secrets)"),
+]
+
+
+def deny_reason(command: str) -> str | None:
+    import re
+    for pat, why in DENY_CMD:
+        if re.search(pat, command, re.I | re.M):
+            return why
+    return None
+
+
+def log_call(tool: str, detail: str = "") -> None:
+    """Record a kit tool invocation (hook-free telemetry for cost.py / status.py)."""
+    try:
+        append_jsonl(STATE / "calls.jsonl", {"ts": now_iso(), "t": time.time(), "tool": tool, "detail": detail[:160]})
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------- cost model
@@ -279,8 +301,11 @@ def unit_cost(model_key: str, calls: float, work_tokens: float, out_tokens: floa
 
 
 def model_for_agent(agent: str, pr: dict | None = None) -> str:
+    """Model key for cost maths. 'inherit' = the agent runs on the chat's model
+    (pricing.json chat_model), which is how Planner/Reviewer avoid the subagent cost-tier error."""
     pr = pr or pricing()
-    return pr.get("agent_models", {}).get(agent, "sonnet")
+    m = pr.get("agent_models", {}).get(agent, "sonnet")
+    return pr.get("chat_model", "opus") if m == "inherit" else m
 
 
 def fmt_usd(x: float) -> str:
@@ -349,3 +374,9 @@ def split_text(text: str, max_chars: int) -> list[str]:
     if cur:
         parts.append("\n\n".join(cur))
     return parts
+
+
+# every kit CLI run is one agent tool call: log it (hook-free call counting)
+_script = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ""
+if _script.endswith(".py") and _script not in ("memguard.py", "hooks.py", "status.py", "doctor.py", "common.py"):
+    log_call(_script[:-3], " ".join(sys.argv[1:3]))

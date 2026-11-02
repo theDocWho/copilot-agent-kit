@@ -18,10 +18,11 @@ Give it any task. **Opus plans and reviews, Sonnet implements, Haiku fetches, cr
 ## Install (about 5 minutes)
 
 1. Copy `.github/`, `.agents/` and `.vscode/tasks.json` into the root of your workspace. **Merge** `.vscode/settings.json` into your existing settings rather than overwriting them.
-2. Run `pip install psutil pypdf`. psutil is needed for memory measurement and caps, and pypdf for PDF text. Playwright is optional and only used by `--render` for JavaScript-heavy sites.
+2. Optional: `pip install psutil pypdf`. Neither is required. Memory is measured with built-in fallbacks if psutil can't be installed (see *Locked-down environments*), and pypdf is only needed for PDF text. Playwright is optional and only used by `--render` for JavaScript-heavy sites.
 3. Run **Terminal → Run Task → "Agents: doctor (check setup)"**. Every line should be OK.
 4. Open the model picker and check the model names. The agents pin `Claude Opus 5.5`, `Claude Sonnet 5.5` and `Claude Haiku 4.5`. If your org shows different labels, edit the `model:` line in each `.github/agents/*.agent.md`.
-5. In the chat permissions picker choose **Allow all**, or type `/yolo`. **Don't use Autopilot**: Autopilot answers blocking questions by itself, and this kit is built to bring every question to you.
+5. Keep the chat's model picker on **Claude Opus 5.5** when you use the Orchestrator, and run **`/kit-check`** once. It starts each subagent with a tiny prompt and tells you if a model name or cost tier is wrong.
+6. Permissions: either keep the default level (the kit's scripts are auto-approved by `.vscode/settings.json`, and anything else asks you), or choose **Allow all**. **Don't use Autopilot**: Autopilot answers blocking questions by itself, and this kit is built to bring every question to you.
 
 ## Use
 
@@ -41,11 +42,10 @@ Give it any task. **Opus plans and reviews, Sonnet implements, Haiku fetches, cr
 ### 1. Stay inside a 4 GB memory budget
 There are three things that make VS Code hang, and each one has a fix:
 
-* **Huge chat context.** Page text never enters the chat. `crawl.py` writes trimmed markdown to disk and prints one JSON line. Haiku digest units read a batch of at most about 30k tokens and write a digest of about 1,200 words. Only `summary.md` reaches the Orchestrator. A guard hook **blocks a 9th `web/fetch` within 10 minutes** and tells the agent to use `crawl.py` instead.
-* **Heavy processes.** The crawler keeps its frontier in SQLite, so its memory stays flat whether there are 1k or 100k URLs. Its concurrency adapts: it halves above 80% of `worker_mb` and grows below 50%. Builds and tests run under `memguard.py`, which kills the whole process tree when it goes over the cap or the timeout and returns exit code 137 with the reason. The agent then retries with a smaller batch.
+* **Huge chat context.** Page text never enters the chat. `crawl.py` writes trimmed markdown to disk and prints one JSON line. Haiku digest units read a batch of at most about 30k tokens and write a digest of about 1,200 words. Only `summary.md` reaches the Orchestrator. The Fetcher has **no web-fetch tool** at all: even a single page goes through `crawl.py --max-depth 0` to disk.
+* **Heavy processes.** The crawler keeps its frontier in SQLite, so its memory stays flat whether there are 1k or 100k URLs. Its concurrency adapts: it halves above 80% of `worker_mb` and grows below 50%. Builds and tests run under `memguard.py`. On Windows it puts the command in a Job Object, so Windows itself enforces the cap on the whole process tree. Elsewhere it polls the tree and kills it. Either way it returns exit code 137 with the reason. The agent then retries with a smaller batch.
 * **Global budget.** `total_mb` (4096) covers *all VS Code processes plus every worker the kit starts*. When the total passes `pause_at_pct` (90%):
   - the crawler pauses, then exits with `memory_pause`. The crawl can be resumed later.
-  - the guard hook **refuses to start new subagents**.
   - `next-wave` returns `MEMORY_PAUSE`, and the Orchestrator checkpoints and tells you to resume in a new chat. A new chat frees the renderer memory used by the old one.
 
   If VS Code alone goes over `vscode_soft_limit_mb` (2560), you get "open a new chat" before anything breaks.
@@ -64,14 +64,14 @@ There are three things that make VS Code hang, and each one has a fix:
 Subagents can't ask questions in VS Code (by design). Instead:
 * The Planner lists every decision up front: scope, ambiguities, irreversible actions, credentials, which sites to crawl. The Orchestrator asks them **all in one `askQuestions` form**, together with the expected cost, *before* any work starts.
 * If a worker hits a real decision later, it finishes its unit as `blocked --question`. Other units keep running, and at the end of the wave the Orchestrator asks all the new questions in one form.
-* Allow all is safe enough because the guard hook still denies destructive commands: `rm -rf /`, force-push, `git reset --hard`, `curl | sh`, shutdown and similar.
+* Workers run every terminal command through `memguard.py`, which refuses destructive commands (`rm -rf /`, force-push, `git reset --hard`, `curl | sh`, shutdown, printing secrets, dumping the environment) **without needing hooks**. With the default permission level, only the kit's scripts are auto-approved, so a command that skips memguard still asks you.
 
 ### 4. Cost optimization, and expected vs. actual
 * **Routing.** Mechanical work goes to Haiku and code to Sonnet. Opus only plans and reviews, and it reviews diffs, not whole repos. The Orchestrator has to be Opus because VS Code won't let a subagent run on a more expensive tier than its parent. So the Orchestrator is kept very lean: it never reads pages, digests or code.
 * **Expected cost** is calculated per unit when the plan is imported, from `calls`, `ctx_ktok` and `out_ktok` with a shared cost model: agent loops resend the whole context on every call, and 75% of that is cache reads. You see the total before you approve.
 * **Actual cost** uses the best source available:
   1. GitHub's usage export: `cost.py report --usage-csv usage.csv` gives billed totals per model for the task's time window.
-  2. Tool calls counted by the hooks during each unit's time window.
+  2. Tool calls logged by the kit's own scripts (and by hooks, if your org allows them) during each unit's time window.
   3. What the worker reported in `ledger.py finish`.
 * The report also shows **"same work with every agent on Opus"**, so you can see what the routing saved. If the actual numbers keep differing from the estimates, adjust `assumptions` in `pricing.json`.
 
@@ -87,6 +87,22 @@ Same work with every agent on Opus ≈ $4.06 → routing saved ≈ $1.81 (45%)
 * The **Monitor** agent relays the same information in chat for a few cents of Haiku.
 
 ---
+
+## Locked-down environments
+
+| Constraint | What the kit does |
+|---|---|
+| **Hooks disabled by policy** | Nothing depends on them. `memguard.py` is the safety check (every non-kit command goes through it), `ledger.py next-wave` is the memory gate, and the kit logs its own tool calls to `.agents/state/calls.jsonl` for status and cost. `.github/hooks/` only adds extra telemetry where hooks are allowed. |
+| **psutil can't be installed** | `memprobe.py` measures memory with what is already there. On Windows it uses ctypes (process snapshot plus working-set size, no admin rights, because VS Code runs as you) and falls back to `tasklist`. On Linux it reads `/proc`, and on macOS it runs `ps`. memguard's hard cap on Windows uses a **Job Object**, which needs no extra package. |
+| **Memory can't be read at all** | State `UNMEASURED`: the kit switches to static limits (`memory.static_max_parallel_subagents` = 2, crawl concurrency 2), memguard keeps its timeout, and turn-start tells the Orchestrator to prefer a new chat per phase. `doctor` shows which method is in use and why the others failed. |
+| **A subagent's model can't cost more than the calling chat's** | Planner and Reviewer have **no pinned model**, so they inherit the chat's model and can never exceed it. Implementer (Sonnet) and Fetcher (Haiku) are cheaper than Opus. Keep the chat on Opus when you run the Orchestrator. **Economy mode:** run the chat on Sonnet and set `pricing.json` `chat_model` to `sonnet`; Planner and Reviewer then run on Sonnet. `/kit-check` catches tier and model-name problems before a real task. |
+| **Subagents can't ask questions** | By design, they never need to. The Planner puts every decision into the plan's questions, which you get in one form. A worker that hits a new decision finishes `blocked --question`, and the Orchestrator batches those into one form per wave. |
+| **Subagents can't start subagents** | By design, only the Orchestrator dispatches. A worker that finds more work adds **ledger units** (`ledger.py add`, `batch.py --add-units`), and the next wave picks them up. Nested subagents are never used. |
+| **Python 3.13** | Tested on 3.13. Standard library only, with optional extras. On Windows, if `python` isn't on PATH, the agents use `py -3`, and the auto-approve rule covers `python`, `python3`, `py -3` and `py -3.13`. |
+
+**VS Code version.** Newer versions are fine; the kit doesn't depend on a particular release. Two things to watch:
+* From 1.140 on, VS Code also ships the **Copilot harness** (Copilot SDK in the Agent Host) and may select it by default. This kit's agent files target the **Local** harness (`runSubagent`, `askQuestions`, handoffs, VS Code tool names), so pick **Local** in the harness / session-target picker. If your org sets a permissions or sandbox policy, 1.142+ requires the Copilot harness for full chat sessions. In that case the scripts and ledger still work, but the agent files would need adapting to Copilot-format custom agents.
+* None of the three subagent limits goes away in newer versions. Nesting can be switched on in the Local harness with `chat.subagents.allowInvocationsFromSubagents`, but the kit doesn't need it. Leave it off.
 
 ## Using your own skills (e.g. threat modeling)
 
@@ -164,7 +180,7 @@ Only the standard library is used, except for PDFs. Files are processed one at a
                │   BLOCKED ─► one askQuestions batch
                │   END_TURN / MEMORY_PAUSE ─► checkpoint, "run /next-wave"
                └─ ALL_DONE ─► final review ─► cost.py report ─► ledger.py close
-guard hook (every tool call): blocks destructive commands, bulk fetching, and new subagents when memory is over budget
+memguard.py (every non-kit command): safety check + memory cap · next-wave: memory gate · no hooks required
 ```
 
 ## Tuning (`.agents/config/budget.json`)
@@ -187,20 +203,20 @@ guard hook (every tool call): blocks destructive commands, bulk fetching, and ne
 
 ```
 .github/agents/*.agent.md     the 6 agents (model pinned per agent)
-.github/prompts/*.prompt.md   /run-task, /next-wave, /status, /cost-report
-.github/hooks/agent-kit.json  guard + telemetry hooks -> .agents/tools/hooks.py
+.github/prompts/*.prompt.md   /run-task, /next-wave, /status, /cost-report, /kit-check
+.github/hooks/agent-kit.json  optional hooks (extra guard + telemetry) -> .agents/tools/hooks.py
 .github/copilot-instructions.md   shared rules (files not chat, budgets, questions)
 .agents/config/               budget.json, pricing.json
 .agents/playbooks/            task playbooks (threat-model.md + example plan)
-.agents/tools/                ledger, skills, crawl, confluence, convert, batch, memguard, status, cost, hooks, doctor (stdlib + psutil)
-.agents/state/  (runtime)     active task, ledgers, unit briefs, notes, reviews, hook log, progress
+.agents/tools/                ledger, skills, crawl, confluence, convert, batch, memguard, memprobe, status, cost, hooks, doctor (stdlib only; psutil optional)
+.agents/state/  (runtime)     active task, ledgers, unit briefs, notes, reviews, call log, progress
 .agents/cache/  (runtime)     crawled pages, batches, digests, summary.md
 ```
 
 ## Things to check in your environment
 * **Model labels** in your org's picker (see Install, step 4).
-* **Hooks** need `chat.useHooks` and a trusted workspace. On Windows the hook runs `python`, and on macOS/Linux it runs `python3`. If hooks don't fire, everything else still works, but you lose the guard, the memory gate and the hook-based call counts.
+* **Hooks** are optional (see *Locked-down environments*).
 * **`chat.agent.maxRequests`** may be capped by your org or by an experiment. If so, set `agents.max_requests_setting` to the real value.
 * **Billing mode.** If your org is still on legacy premium requests, set `legacy_premium_requests.enabled` in `pricing.json` and fill in the multipliers. The report will then show premium requests as well.
-* **Confluence**: a 401/403 means the token can't see that content. The guard hook blocks commands that print tokens or dump environment variables, so secrets stay out of chat history.
+* **Confluence**: a 401/403 means the token can't see that content. memguard refuses commands that print tokens or dump environment variables, so secrets stay out of chat history.
 * `vscode_process_names`: if `doctor` says it finds no VS Code processes while VS Code is open, add your process names to this list.
