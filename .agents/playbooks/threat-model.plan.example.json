@@ -1,0 +1,251 @@
+{
+  "summary": "EXAMPLE threat-model plan for one repo (payments-api), one Confluence space (ARCH), a design-docs folder and the SEC standards space. The Planner adapts ids, paths and filters to your answers; replace <...> skill sections with your skill's real headings.",
+  "questions": [
+    {
+      "id": "Q1",
+      "question": "Which repos/services are in scope, and what is out of scope?",
+      "default": "payments-api only",
+      "blocking": true
+    },
+    {
+      "id": "Q2",
+      "question": "Which Confluence spaces/labels/page trees describe the system? Include attachments?",
+      "default": "space ARCH, with attachments",
+      "blocking": false
+    },
+    {
+      "id": "Q3",
+      "question": "Where are the internal security standards and processes?",
+      "options": [
+        "Confluence space SEC",
+        "A folder (give path)"
+      ],
+      "default": "Confluence space SEC",
+      "blocking": true
+    },
+    {
+      "id": "Q4",
+      "question": "Are CONFLUENCE_URL / CONFLUENCE_TOKEN set in the VS Code terminal environment?",
+      "options": [
+        "Yes",
+        "Not yet"
+      ],
+      "blocking": true
+    },
+    {
+      "id": "Q5",
+      "question": "Output location and format?",
+      "default": "threat-model/THREAT_MODEL.md",
+      "blocking": false
+    }
+  ],
+  "units": [
+    {
+      "id": "G-CODE-payments",
+      "title": "Inventory payments-api codebase",
+      "agent": "Fetcher",
+      "skill": [
+        {
+          "path": ".agents/playbooks/threat-model.md",
+          "section": "Phase 1 — Gather (all units independent → same wave)"
+        },
+        {
+          "path": ".github/skills/threat-model/SKILL.md",
+          "section": "<inventory section>"
+        }
+      ],
+      "instructions": "Inventory services/payments-api using text search and targeted reads only: components, entry points, data stores, external calls, authn/authz, secrets, crypto/TLS, IaC/Docker/K8s/CI, dependency manifests. Cite file:line for every item.",
+      "inputs": [
+        "services/payments-api"
+      ],
+      "outputs": [
+        "threat-model/inventory/code-payments.md"
+      ],
+      "est": {
+        "calls": 18,
+        "ctx_ktok": 40,
+        "out_ktok": 4
+      }
+    },
+    {
+      "id": "G-CONF-ARCH",
+      "title": "Pull Confluence space ARCH with attachments",
+      "agent": "Fetcher",
+      "instructions": "Run `python .agents/tools/confluence.py --job kb-conf-ARCH --space ARCH --attachments`; re-run while status is time_slice. Then run the printed convert.py command for attachments, then `python .agents/tools/batch.py --job kb-conf-ARCH --add-units --question \"architecture, components, data flows, trust boundaries, data classification, security controls, dependencies\"` (and the same batch command for kb-conf-ARCH-att if it has pages).",
+      "outputs": [
+        ".agents/cache/kb-conf-ARCH/pages"
+      ],
+      "est": {
+        "calls": 8,
+        "ctx_ktok": 5,
+        "out_ktok": 1
+      }
+    },
+    {
+      "id": "G-DOCS",
+      "title": "Convert design and infrastructure documents",
+      "agent": "Fetcher",
+      "instructions": "Run `python .agents/tools/convert.py --job kb-docs --inputs docs/hld docs/infra`; re-run while time_slice; then `python .agents/tools/batch.py --job kb-docs --add-units --question \"architecture, components, data flows, trust boundaries, data classification, security controls, dependencies\"`.",
+      "inputs": [
+        "docs/hld",
+        "docs/infra"
+      ],
+      "outputs": [
+        ".agents/cache/kb-docs/pages"
+      ],
+      "est": {
+        "calls": 6,
+        "ctx_ktok": 5,
+        "out_ktok": 1
+      }
+    },
+    {
+      "id": "G-STD",
+      "title": "Build the internal standards catalog",
+      "agent": "Fetcher",
+      "instructions": "Run `python .agents/tools/confluence.py --job kb-standards --space SEC --label standard`; re-run while time_slice; then `python .agents/tools/batch.py --job kb-standards --add-units --question \"list every requirement as: ID | requirement (short) | applies to | how compliance is evidenced\"`.",
+      "outputs": [
+        ".agents/cache/kb-standards/pages"
+      ],
+      "est": {
+        "calls": 6,
+        "ctx_ktok": 5,
+        "out_ktok": 1
+      }
+    },
+    {
+      "id": "G-IMG",
+      "title": "Turn architecture images into models",
+      "agent": "Fetcher",
+      "depends_on": [
+        "G-CONF-ARCH",
+        "G-DOCS"
+      ],
+      "instructions": "For every image in .agents/cache/*/images.json: if the diagram-to-dsl skill is installed, run its parser and save the model and C4/Mermaid output under threat-model/inventory/diagrams/. List images it cannot parse with a one-line reason.",
+      "outputs": [
+        "threat-model/inventory/diagrams.md"
+      ],
+      "est": {
+        "calls": 12,
+        "ctx_ktok": 10,
+        "out_ktok": 3
+      }
+    },
+    {
+      "id": "M-MODEL",
+      "title": "Build the system model and schedule threat groups",
+      "agent": "Implementer",
+      "skill": [
+        {
+          "path": ".agents/playbooks/threat-model.md",
+          "section": "Phase 2"
+        },
+        {
+          "path": ".github/skills/threat-model/SKILL.md",
+          "section": "<system model section>"
+        }
+      ],
+      "depends_on": [
+        "G-CODE-payments",
+        "G-CONF-ARCH",
+        "R-kb-conf-ARCH-*",
+        "G-DOCS",
+        "R-kb-docs-*",
+        "G-STD",
+        "R-kb-standards-*",
+        "G-IMG"
+      ],
+      "instructions": "From the inventories, diagrams.md and the summary.md files only, write the system model (components, stores, external entities, Mermaid DFD, trust boundaries, data classification, assets), citing sources and listing doc/code conflicts. Then split it into groups (<=5 elements or one trust boundary) and add per group with ledger.py add: T-<group> (Implementer, depends on M-REVIEW), C-EVID-<group> (Fetcher, depends on T-<group>), C-JUDGE-<group> (Reviewer, depends on C-EVID-<group>), using the playbook's Phase 3-4 instructions and estimates.",
+      "inputs": [
+        "threat-model/inventory/",
+        ".agents/cache/kb-conf-ARCH/summary.md",
+        ".agents/cache/kb-docs/summary.md"
+      ],
+      "outputs": [
+        "threat-model/system-model.md"
+      ],
+      "est": {
+        "calls": 18,
+        "ctx_ktok": 45,
+        "out_ktok": 10
+      }
+    },
+    {
+      "id": "M-REVIEW",
+      "title": "Review the system model",
+      "agent": "Reviewer",
+      "depends_on": [
+        "M-MODEL"
+      ],
+      "skill": [
+        {
+          "path": ".agents/playbooks/threat-model.md",
+          "section": "Phase 2"
+        },
+        {
+          "path": ".github/skills/threat-model/SKILL.md",
+          "section": "<system model section>"
+        }
+      ],
+      "instructions": "Spot-check 3-5 elements of threat-model/system-model.md against the sources they cite; look for missing trust boundaries and wrong flows. PASS or add fix units.",
+      "inputs": [
+        "threat-model/system-model.md"
+      ],
+      "outputs": [
+        ".agents/state reviews"
+      ],
+      "est": {
+        "calls": 8,
+        "ctx_ktok": 20,
+        "out_ktok": 3
+      }
+    },
+    {
+      "id": "R-REPORT",
+      "title": "Assemble the threat model report",
+      "agent": "Implementer",
+      "depends_on": [
+        "C-JUDGE-*"
+      ],
+      "skill": [
+        {
+          "path": ".agents/playbooks/threat-model.md",
+          "section": "Phase 5 — Report"
+        },
+        {
+          "path": ".github/skills/threat-model/SKILL.md",
+          "section": "<report template section>"
+        }
+      ],
+      "instructions": "Assemble threat-model/THREAT_MODEL.md in the skill's template from system-model.md, threats/*.md and credibility/*.md: scope, assumptions, model + DFD, threats by residual risk with verdicts, gaps vs standards (std ID -> threat -> recommended control), doc/code conflicts, open questions, sources.",
+      "outputs": [
+        "threat-model/THREAT_MODEL.md"
+      ],
+      "est": {
+        "calls": 12,
+        "ctx_ktok": 40,
+        "out_ktok": 10
+      }
+    },
+    {
+      "id": "FINAL-REVIEW",
+      "title": "Final review against the request",
+      "agent": "Reviewer",
+      "depends_on": [
+        "R-REPORT"
+      ],
+      "instructions": "Check THREAT_MODEL.md against the original request and the skill's quality bar; every verdict must cite a standard and evidence.",
+      "inputs": [
+        "threat-model/THREAT_MODEL.md"
+      ],
+      "outputs": [
+        ".agents/state reviews"
+      ],
+      "est": {
+        "calls": 8,
+        "ctx_ktok": 25,
+        "out_ktok": 3
+      }
+    }
+  ]
+}

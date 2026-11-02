@@ -31,6 +31,19 @@ AGENTS_OK = {"Fetcher", "Implementer", "Reviewer", "Planner"}
 DONE = {"done", "skipped"}
 
 
+def deps_done(u: dict, units: dict) -> bool:
+    """All dependencies finished. 'PREFIX-*' = every unit whose id starts with PREFIX-
+    (units added later included) must be done, and at least one must exist."""
+    for d in u.get("depends_on", []):
+        if d.endswith("*"):
+            match = [x for k, x in units.items() if k.startswith(d[:-1]) and k != u["id"]]
+            if not match or any(x["status"] not in DONE for x in match):
+                return False
+        elif units.get(d, {}).get("status") not in DONE:
+            return False
+    return True
+
+
 # ------------------------------------------------------------------ storage
 def active_id() -> str:
     a = load_json(STATE / "active.json", {}) or {}
@@ -88,13 +101,24 @@ def write_brief(tdir: Path, unit: dict, max_calls: int) -> Path:
     calls = unit.get("est", {}).get("calls", 10)
     lst = lambda xs: "\n".join(f"- {x}" for x in xs) if xs else "- (none)"  # noqa: E731
     answers = tdir / "answers.md"
+    refs = unit.get("skill") or []
+    refs = refs if isinstance(refs, list) else [refs]
+    skill_md = ""
+    if refs:
+        lines = []
+        for r in refs:
+            r = {"path": r} if isinstance(r, str) else r
+            lines.append(f"- `{r['path']}`" + (f" — section **{r['section']}**" if r.get("section") else ""))
+        skill_md = ("\n## Method (authoritative for how to do the work)\n" + "\n".join(lines) +
+                    "\nRead only the named section (find its heading with a text search, then read that range)."
+                    " Follow its method, rating scales and output format. This brief's budget, inputs and outputs still win.\n")
     p.write_text(f"""# {unit['id']} — {unit['title']}
 
 Agent: **{unit['agent']}** ({model}) · Tool-call budget: **{min(calls + 3, max_calls)}** (hard stop) · Depends on: {', '.join(unit.get('depends_on', [])) or 'nothing'}
 
 ## Instructions
 {unit.get('instructions', unit['title'])}
-
+{skill_md}
 ## Inputs (read only what you need)
 {lst(unit.get('inputs', []))}
 
@@ -164,7 +188,7 @@ def cmd_import_plan(a):
     units = [normalize_unit(u, max_calls) for u in plan.get("units", [])]
     ids = {u["id"] for u in units}
     for u in units:
-        missing = [d for d in u["depends_on"] if d not in ids]
+        missing = [d for d in u["depends_on"] if d not in ids and not d.endswith("*")]
         if missing:
             sys.exit(f"Unit {u['id']} depends on unknown {missing}")
 
@@ -259,8 +283,7 @@ def cmd_next_wave(a):
             return ("MEMORY_PAUSE", [])
         t = led.setdefault("turn", {"budget": turn_budget_calls(), "used": 0})
         remaining = t["budget"] - t["used"] - orch_cost
-        ready = [u for u in units.values() if u["status"] == "pending"
-                 and all(units.get(d, {}).get("status") in DONE for d in u["depends_on"])]
+        ready = [u for u in units.values() if u["status"] == "pending" and deps_done(u, units)]
         ready.sort(key=lambda u: (len(u["depends_on"]), u["id"]))
         picked, spend = [], 0
         for u in ready:
@@ -280,7 +303,7 @@ def cmd_next_wave(a):
                 return ("NEEDS_ATTENTION", blocked)
             if ready:
                 return ("END_TURN", [])
-            return ("NOTHING_READY", [])
+            return ("NOTHING_READY", [u for u in units.values() if u["status"] == "pending"])
         wave = len(led["waves"]) + 1
         for u in picked:
             u["status"], u["wave"], u["queued"] = "queued", wave, now_iso()
@@ -308,6 +331,11 @@ def cmd_next_wave(a):
             print("blocked -> ask the pending questions (ledger.py questions) in ONE askQuestions call, then `answer`;"
                   " failed -> decide: reset-unit <ID> (retry) or add a smaller replacement unit;"
                   " split -> make sure follow-up units were added, then mark the original skipped via finish --status skipped.")
+    elif status == "NOTHING_READY":
+        for u in units[:8]:
+            print(f"  {u['id']} waits on {', '.join(u['depends_on'])}")
+        print("These wait on units that do not exist or will never finish. Check `ledger.py show`; add the missing"
+              " units (ledger.py add) or ask the user.")
     elif status == "ALL_DONE":
         print("All units done. Run the final Reviewer unit if not yet run, then `cost.py report` and `ledger.py close`.")
 

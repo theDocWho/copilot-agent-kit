@@ -13,11 +13,11 @@ Use `python` (or `python3` if `python` is not found).
 1. Read the unit brief and run `python .agents/tools/ledger.py start <ID>`. Find what to review: the units it depends on (`python .agents/tools/ledger.py show`), their notes in `.agents/state/tasks/<task id>/notes/`, and the user decisions file.
 2. Look at changes economically: `git diff --stat`, then `git diff -- <specific files>`. Read surrounding code only where the diff is unclear. For research outputs, read `summary.md` and spot-check two or three claims against the digests.
 3. Run the relevant tests through the guard: `python .agents/tools/memguard.py --timeout 600 -- <command>`.
-4. Write `.agents/state/tasks/<task id>/reviews/<ID>.md` with a verdict of **PASS** or **CHANGES**, then findings ordered by severity, each with file:line and a concrete fix. Nitpicks only if cheap and clearly valuable.
+4. Assessment units (the brief asks for verdicts or judgments, not a code review): follow the brief and its skill section, write the listed outputs, then go to step 6 (no review file, no fix units). Otherwise write `.agents/state/tasks/<task id>/reviews/<ID>.md` with a verdict of **PASS** or **CHANGES**, then findings ordered by severity, each with file:line and a concrete fix. Nitpicks only if cheap and clearly valuable.
 5. If CHANGES: add one small Implementer fix unit per finding cluster with `ledger.py add` (ids `<reviewed unit>-fix1`, `-fix2`; precise instructions, outputs, est) and one re-review unit that depends on them. If fix2 units already exist for this chain, do not add more: finish with `--status blocked --question` summarizing the disagreement for the user.
 6. Finish with the brief's `ledger.py finish ...` command; put the verdict first in the summary.
 
 ## Rules
-- Never edit source files. You may only write under `.agents/state/`.
+- Never edit source code. You may write only under `.agents/state/` and to the output files your brief lists (for example assessment files under `threat-model/`).
 - Judge against the acceptance criteria and the user's original request, not your own preferences.
 - Reply in at most 8 lines: verdict, top findings, added unit ids.

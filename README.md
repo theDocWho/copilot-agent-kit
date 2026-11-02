@@ -88,6 +88,20 @@ Same work with every agent on Opus ≈ $4.06 → routing saved ≈ $1.81 (45%)
 
 ---
 
+## Using your own skills (e.g. threat modeling)
+
+Put your skill where VS Code finds it, e.g. `.github/skills/threat-model/SKILL.md`, and start the task as usual with `/run-task`. The Planner first runs `skills.py --match "<your request>"`:
+
+* **Skill = method.** If a skill matches, the Planner reads its outline and only the sections it needs. Each unit's brief then points the worker at the exact section ("follow `.github/skills/threat-model/SKILL.md`, section *Credibility rules*"), so methodology, rating scales, templates and report format come from your skill.
+* **Playbook = execution.** `.agents/playbooks/` holds unit layouts for recurring task types. `threat-model.md` covers your flow: gather (code inventory, Confluence, documents, standards catalog, diagrams) → system model → threats per group → credibility against internal standards → report. It also says which agent does each step and gives budget hints. When a skill and a playbook both match, the playbook gives the units and the skill gives the method.
+* **The kit's rules override how a skill says to execute.** "Read all Confluence pages" becomes `confluence.py` plus Haiku digests, "read the codebase" becomes search-based inventory units, and "ask the user" becomes questions in the one up-front form.
+* Units can add units at run time. For example, the system-model unit creates one threat, evidence and verdict unit per component group, and dependencies like `"C-JUDGE-*"` wait for all of them.
+* `.agents/playbooks/threat-model.plan.example.json` is a complete example plan (one repo, one Confluence space, a docs folder, a standards space). It imports cleanly; the expected cost before digest units is about $2.19.
+
+Credibility is where routing pays off most: Haiku (`C-EVID`) searches the standards catalog and the code for evidence and writes facts only, and Opus (`C-JUDGE`) reads just those short evidence files to give the verdict: Credible, Mitigated (std ID + evidence), Gap, Not applicable, or Needs info.
+
+Add more playbooks the same way (a markdown file with `name` and `description` front matter). Run `python .agents/tools/skills.py` to see what the Planner can find.
+
 ## Internal sources
 
 Everything below writes into the same job store as the web crawler, so `batch.py --job <job> --add-units` turns any source into Haiku digest units the same way. Secrets are always passed as the **name** of an environment variable. Their values are read at run time, sent only to the source's own host (and stripped if a redirect leaves it), and never written to disk, printed, or put in chat.
@@ -177,7 +191,8 @@ guard hook (every tool call): blocks destructive commands, bulk fetching, and ne
 .github/hooks/agent-kit.json  guard + telemetry hooks -> .agents/tools/hooks.py
 .github/copilot-instructions.md   shared rules (files not chat, budgets, questions)
 .agents/config/               budget.json, pricing.json
-.agents/tools/                ledger, crawl, confluence, convert, batch, memguard, status, cost, hooks, doctor (stdlib + psutil)
+.agents/playbooks/            task playbooks (threat-model.md + example plan)
+.agents/tools/                ledger, skills, crawl, confluence, convert, batch, memguard, status, cost, hooks, doctor (stdlib + psutil)
 .agents/state/  (runtime)     active task, ledgers, unit briefs, notes, reviews, hook log, progress
 .agents/cache/  (runtime)     crawled pages, batches, digests, summary.md
 ```
