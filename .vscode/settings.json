@@ -1,0 +1,40 @@
+{
+  // ---- Agent kit: requests per turn ------------------------------------------------
+  // The Orchestrator schedules at most turn_budget_pct (60%) of this per chat turn
+  // (see .agents/config/budget.json), so the "Continue?" prompt should not fire mid-wave.
+  // Keep agents.max_requests_setting in budget.json equal to this value.
+  "chat.agent.maxRequests": 150,
+
+  // ---- Subagents --------------------------------------------------------------------
+  "chat.subagents.allowInvocationsFromSubagents": false, // no runaway nesting
+  "chat.subagents.defaultToAuto": false,                 // each agent pins its own model
+  "chat.subagents.useRichRendering": false,              // inline, not one editor per subagent -> less memory
+  "chat.subagents.showCreditUsage": true,                // see AI credits per subagent
+
+  // ---- Hooks (guard + telemetry in .github/hooks/agent-kit.json) --------------------
+  "chat.useHooks": true,
+  "chat.useCustomAgentHooks": true,
+
+  // ---- Approvals (used when you are NOT in "Allow all") --------------------------------
+  "chat.tools.terminal.autoApprove": {
+    "/^python3? \\.agents\\/tools\\//": true,
+    "/^python3? \\.agents\\\\tools\\\\/": true,
+    "git status": true,
+    "git diff": true,
+    "git log": true
+  },
+
+  // ---- Keep crawl output from eating VS Code memory --------------------------------
+  "files.watcherExclude": {
+    "**/.agents/cache/**": true,
+    "**/.agents/state/**": true
+  },
+  "search.exclude": {
+    "**/.agents/cache/**": true
+  },
+  "files.exclude": {
+    "**/.agents/cache/*/pages": true,
+    "**/.agents/cache/*/*.sqlite*": true
+  },
+  "terminal.integrated.scrollback": 3000
+}

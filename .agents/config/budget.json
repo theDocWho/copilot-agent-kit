@@ -1,0 +1,42 @@
+{
+  "_comment": "Resource + request budgets. Edit freely. All tools read this file at startup.",
+
+  "memory": {
+    "total_mb": 4096,
+    "vscode_soft_limit_mb": 2560,
+    "worker_mb": 1024,
+    "pause_at_pct": 90,
+    "resume_at_pct": 75,
+    "vscode_process_names": ["Code.exe", "code", "Code", "Code Helper", "Code Helper (Renderer)", "Code Helper (Plugin)", "Code Helper (GPU)", "Code - Insiders", "Code - Insiders.exe", "code-insiders", "electron"],
+    "_note": "total_mb = VS Code (all processes) + every worker started by the agents. Workers get worker_mb; when the total crosses pause_at_pct the crawler pauses and the guard hook refuses new subagents until it drops below resume_at_pct."
+  },
+
+  "crawl": {
+    "start_concurrency": 4,
+    "max_concurrency": 8,
+    "max_page_bytes": 2000000,
+    "max_text_chars": 40000,
+    "max_links_per_page": 300,
+    "per_host_delay_s": 0.5,
+    "timeout_s": 20,
+    "time_slice_s": 240,
+    "render_restart_every": 40,
+    "user_agent": "Mozilla/5.0 (compatible; workspace-research-bot/1.0)"
+  },
+
+  "batching": {
+    "chars_per_token": 4,
+    "max_tokens_per_batch": 30000,
+    "max_files_per_batch": 12,
+    "reduce_when_digest_tokens_over": 40000
+  },
+
+  "agents": {
+    "max_parallel_subagents": 3,
+    "max_requests_setting": 150,
+    "turn_budget_pct": 60,
+    "max_calls_per_unit": 25,
+    "orchestrator_calls_per_wave": 6,
+    "_note": "turn budget = max_requests_setting * turn_budget_pct/100 tool calls per chat turn, counting the orchestrator and all subagents it starts. next-wave never schedules past it, so the 'Continue?' prompt never fires mid-wave."
+  }
+}

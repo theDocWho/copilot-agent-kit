@@ -1,0 +1,39 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Agents: watch status",
+      "type": "shell",
+      "command": "python .agents/tools/status.py --watch 15",
+      "linux": { "command": "python3 .agents/tools/status.py --watch 15" },
+      "osx": { "command": "python3 .agents/tools/status.py --watch 15" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "panel": "dedicated", "reveal": "always", "focus": false }
+    },
+    {
+      "label": "Agents: cost report",
+      "type": "shell",
+      "command": "python .agents/tools/cost.py report",
+      "linux": { "command": "python3 .agents/tools/cost.py report" },
+      "osx": { "command": "python3 .agents/tools/cost.py report" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Agents: memory report",
+      "type": "shell",
+      "command": "python .agents/tools/memguard.py --report",
+      "linux": { "command": "python3 .agents/tools/memguard.py --report" },
+      "osx": { "command": "python3 .agents/tools/memguard.py --report" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Agents: doctor (check setup)",
+      "type": "shell",
+      "command": "python .agents/tools/doctor.py",
+      "linux": { "command": "python3 .agents/tools/doctor.py" },
+      "osx": { "command": "python3 .agents/tools/doctor.py" },
+      "problemMatcher": []
+    }
+  ]
+}

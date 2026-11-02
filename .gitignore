@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.agents/cache/
+.agents/state/
+.agents/STATUS.md

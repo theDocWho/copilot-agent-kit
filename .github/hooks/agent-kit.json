@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "python3 .agents/tools/hooks.py sessionStart",
+        "powershell": "python .agents/tools/hooks.py sessionStart",
+        "timeoutSec": 10
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "python3 .agents/tools/hooks.py preToolUse",
+        "powershell": "python .agents/tools/hooks.py preToolUse",
+        "timeoutSec": 10
+      }
+    ],
+    "subagentStart": [
+      {
+        "type": "command",
+        "bash": "python3 .agents/tools/hooks.py subagentStart",
+        "powershell": "python .agents/tools/hooks.py subagentStart",
+        "timeoutSec": 10
+      }
+    ],
+    "subagentStop": [
+      {
+        "type": "command",
+        "bash": "python3 .agents/tools/hooks.py subagentStop",
+        "powershell": "python .agents/tools/hooks.py subagentStop",
+        "timeoutSec": 10
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "python3 .agents/tools/hooks.py agentStop",
+        "powershell": "python .agents/tools/hooks.py agentStop",
+        "timeoutSec": 10
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "bash": "python3 .agents/tools/hooks.py sessionEnd",
+        "powershell": "python .agents/tools/hooks.py sessionEnd",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}
