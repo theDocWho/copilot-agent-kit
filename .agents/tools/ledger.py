@@ -30,12 +30,14 @@ import argparse
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gates  # noqa: E402
 from common import (AGENTS, STATE, budget, file_lock, fmt_usd, load_json, memory_snapshot,  # noqa: E402
-                    model_for_agent, now_iso, pricing, rel, save_json, static_limits, turn_budget_calls, unit_cost)
+                    model_for_agent, now_iso, parse_iso, pricing, read_jsonl, rel, save_json, static_limits,
+                    turn_budget_calls, unit_cost, unregister_worker)
 
 AGENTS_OK = {"Fetcher", "Implementer", "Reviewer", "Planner"}
 DONE = {"done", "skipped"}
@@ -71,10 +73,23 @@ def ledger_path(tid: str | None = None) -> Path:
 
 
 def load(tid: str | None = None) -> dict:
-    led = load_json(ledger_path(tid))
-    if led is None:
-        sys.exit(f"Ledger missing for task {tid or active_id()}")
-    return led
+    """Load the ledger; if it is missing or damaged (crash mid-write, disk full, manual edit)
+    fall back to the last good copy (ledger.json.bak) and say so."""
+    p = ledger_path(tid)
+    for cand in (p, p.with_suffix(".json.bak")):
+        try:
+            with open(cand, "r", encoding="utf-8") as f:
+                led = json.load(f)
+            if cand != p:
+                print(f"WARNING: {rel(p)} was unreadable; recovered from {cand.name}. The last change may be missing.",
+                      file=sys.stderr)
+                save_json(p, led)
+            return led
+        except FileNotFoundError:
+            continue
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+    sys.exit(f"Ledger missing or unreadable for task {tid or active_id()} (no usable backup)")
 
 
 def mutate(fn, tid: str | None = None):
@@ -83,6 +98,12 @@ def mutate(fn, tid: str | None = None):
         led = load(tid)
         out = fn(led)
         led["updated"] = now_iso()
+        if p.exists():  # keep the previous good version
+            try:
+                json.loads(p.read_text(encoding="utf-8"))
+                p.with_suffix(".json.bak").write_bytes(p.read_bytes())
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                pass
         save_json(p, led)
     return out
 
@@ -113,6 +134,18 @@ def write_brief(tdir: Path, unit: dict, max_calls: int) -> Path:
     answers = tdir / "answers.md"
     refs = unit.get("skill") or []
     refs = refs if isinstance(refs, list) else [refs]
+    resume_md = ""
+    if unit.get("interrupted"):
+        last = unit["interrupted"][-1]
+        prog = tdir / "notes" / f"{unit['id']}.progress.md"
+        resume_md = (f"\n## RESUME — attempt {unit.get('attempts', 1) + 1}\n"
+                     f"A previous attempt stopped at {last['at']} without finishing (crash, closed chat or restart). "
+                     "Do NOT start over. First:\n"
+                     f"1. Read `{rel(prog)}` (your earlier checkpoints){'' if prog.exists() else ' (none were written)'}.\n"
+                     "2. Check which outputs above already exist and how complete they are.\n"
+                     "3. Run `python .agents/tools/memguard.py --shell \"git status --short\"` (and `git diff --stat`) to see partial edits.\n"
+                     "4. If a crawl/convert/confluence command was running, re-run the same command: it resumes by itself.\n"
+                     "Then continue from the first unfinished step. Don't duplicate edits that are already in place.\n")
     v = unit.get("verify")
     v = [v] if isinstance(v, str) else (v or [])
     verify_md = (" and these commands pass:\n" + "\n".join(f"- `{c}`" for c in v)) if v else "."
@@ -148,6 +181,9 @@ Fix the cause and run finish again. Never weaken a test or a verify command to g
 ## Project memory
 `.agents/PROJECT.md` holds conventions and decisions from earlier tasks. Skim its headings; read only what applies.
 
+## Checkpoints (so a crash never costs the whole unit)
+After each meaningful step run `python .agents/tools/ledger.py checkpoint {unit['id']} "<what is done; what is next>"`.
+{resume_md}
 ## User decisions
 {'See ' + rel(answers) if answers.exists() else 'None recorded yet.'}
 
@@ -283,12 +319,120 @@ def cmd_answer(a):
     print(f"ANSWERED {a.qid}")
 
 
+def unit_last_activity(led: dict, u: dict) -> float:
+    """Latest sign of life for a unit: queued/started time, its progress checkpoints,
+    and any kit call logged since it started."""
+    ts = [parse_iso(u.get("started")) or 0, parse_iso(u.get("queued")) or 0]
+    prog = task_dir(led["id"]) / "notes" / f"{u['id']}.progress.md"
+    if prog.exists():
+        ts.append(prog.stat().st_mtime)
+    start = max(ts)
+    calls = [e.get("t", 0) for e in read_jsonl(STATE / "calls.jsonl", tail=400) if e.get("t", 0) >= start]
+    return max(ts + calls)
+
+
+def recover(force: bool = False, dry: bool = False, new_turn: bool = False) -> dict:
+    """Put units that were left queued/running by an earlier turn (crashed or closed chat,
+    VS Code restart, killed subagent) back in the queue with a resume note.
+    Only units idle for agents.stale_after_min are touched, unless force=True, so a task
+    that is still running in another chat window is not double-dispatched."""
+    stale_s = budget().get("agents", {}).get("stale_after_min", 10) * 60
+    max_att = budget().get("agents", {}).get("max_attempts", 3)
+    now = time.time()
+    out = {"recovered": [], "failed": [], "maybe_running": []}
+
+    def fn(led):
+        cur = led.get("turn", {}).get("n", 0)
+        wave_turn = {w["n"]: w.get("turn") for w in led["waves"]}
+        for u in led["units"].values():
+            if u["status"] not in ("queued", "running"):
+                continue
+            if wave_turn.get(u.get("wave")) == cur and not force and not new_turn:
+                continue  # dispatched in the current turn: genuinely in flight
+            idle = now - unit_last_activity(led, u)
+            if idle < stale_s and not force:
+                out["maybe_running"].append((u["id"], int(idle // 60)))
+                continue
+            if dry:
+                out["recovered"].append(u["id"])
+                continue
+            u["attempts"] = u.get("attempts", 0) + 1
+            u.setdefault("interrupted", []).append({"at": now_iso(), "wave": u.get("wave"), "was": u["status"]})
+            u["status"] = "interrupted"
+            record_wave_result(led, u)
+            if u["attempts"] >= max_att:
+                u["status"], u["finished"] = "failed", now_iso()
+                u["result"] = {"summary": f"interrupted {u['attempts']} times without finishing"}
+                out["failed"].append(u["id"])
+            else:
+                u["status"] = "pending"
+                for k in ("wave", "queued", "started"):
+                    u.pop(k, None)
+                u["brief"] = rel(write_brief(task_dir(led["id"]), u, budget().get("agents", {}).get("max_calls_per_unit", 25)))
+                out["recovered"].append(u["id"])
+        return out
+    if dry:
+        fn(load())
+    else:
+        mutate(fn)
+    return out
+
+
+def kill_orphan_workers(led: dict) -> list[str]:
+    """Worker processes (crawls, memguard commands) left alive by a crashed session while no
+    unit is running. They are the kit's own processes, so stopping them is safe; crawls resume."""
+    if any(u["status"] in ("queued", "running") for u in led["units"].values()):
+        return []
+    import watchdog as wd
+    killed = []
+    for pid, meta in (load_json(STATE / "workers.json", {}) or {}).items():
+        if wd.alive(int(pid)):
+            wd.kill(int(pid))
+            killed.append(f"{meta.get('label')} (pid {pid})")
+        unregister_worker(int(pid))
+    return killed
+
+
+def cmd_recover(a):
+    r = recover(force=a.force, dry=a.dry_run)
+    for k in ("recovered", "failed"):
+        if r[k]:
+            print(f"{k.upper()}: {', '.join(r[k])}" + (" (dry run)" if a.dry_run else ""))
+    for uid, mins in r["maybe_running"]:
+        print(f"POSSIBLY_RUNNING_ELSEWHERE {uid} (last activity {mins} min ago). If the earlier chat crashed or was closed,"
+              " run `ledger.py recover --force`.")
+    if not any(r.values()):
+        print("NOTHING_TO_RECOVER")
+
+
+def cmd_checkpoint(a):
+    """Workers note progress after each meaningful step, so an interrupted unit resumes instead of restarting."""
+    p = task_dir() / "notes" / f"{a.uid}.progress.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(f"- {now_iso()} {a.text.strip()}\n")
+    print(f"CHECKPOINT {a.uid}")
+
+
 def cmd_turn_start(a):
+    rec = recover(new_turn=True)  # anything still queued/running belongs to an earlier turn
+
     def fn(led):
         t = led.setdefault("turn", {})
         t.update({"n": t.get("n", 0) + 1, "budget": turn_budget_calls(), "used": 0, "started": now_iso()})
         return t
     t = mutate(fn)
+    if rec["recovered"]:
+        print(f"RECOVERED {', '.join(rec['recovered'])}: left unfinished by an earlier session; re-queued with a resume note"
+              " (workers continue from their checkpoints and partial outputs).")
+    if rec["failed"]:
+        print(f"FAILED_AFTER_RETRIES {', '.join(rec['failed'])}: interrupted too many times; decide with the user.")
+    for uid, mins in rec["maybe_running"]:
+        print(f"POSSIBLY_RUNNING_ELSEWHERE {uid} (activity {mins} min ago). If no other chat is working on this task,"
+              " ask the user and run `ledger.py recover --force`.")
+    orphans = kill_orphan_workers(load())
+    if orphans:
+        print(f"STOPPED_ORPHANS {', '.join(orphans)} (kit processes left by a crashed session; crawls resume on re-run)")
     mem = memory_snapshot()
     print(f"TURN {t['n']} budget={t['budget']} tool calls (orchestrator + subagents). memory={mem['state']}"
           f" ({mem['backend']}) RAM free={mem['ram_available_mb']}MB ({mem['ram_available_pct']}%)"
@@ -377,6 +521,11 @@ def cmd_next_wave(a):
               "close heavy apps or open a new chat, then run /next-wave.")
     elif status == "END_TURN":
         print("Turn budget used. Write a 5-line checkpoint and end your turn (the user or /next-wave resumes). Do NOT keep working.")
+    elif status == "WAIT_RUNNING" and not any(u.get("wave") and any(w["n"] == u["wave"] and w.get("turn") == load().get("turn", {}).get("n") for w in load()["waves"]) for u in units):
+        for u in units:
+            print(f"  {u['id']} status={u['status']} (dispatched in an earlier turn)")
+        print("These were started in an earlier turn and never finished. If no other chat is working on them, the earlier"
+              " session was interrupted: ask the user, then `ledger.py recover --force` and continue.")
     elif status in ("NEEDS_ATTENTION", "WAIT_RUNNING"):
         for u in units:
             print(f"  {u['id']} status={u['status']} {u.get('result', {}).get('summary', '')[:160]}")
@@ -497,8 +646,10 @@ def cmd_peek(a):
         print("DRY_STOP needs the user"); return
     ready = [u for u in units.values() if u["status"] == "pending" and deps_done(u, units)]
     running = [u for u in units.values() if u["status"] in ("queued", "running")]
-    if ready:
-        print(f"WORK_READY {len(ready)} units"); return
+    stale_s = budget().get("agents", {}).get("stale_after_min", 10) * 60
+    stale = [u for u in running if time.time() - unit_last_activity(led, u) >= stale_s]
+    if ready or stale:
+        print(f"WORK_READY {len(ready)} units" + (f" + {len(stale)} interrupted (recovered at turn-start)" if stale else "")); return
     print(f"IDLE {len(running)} running, nothing ready" if running else "STUCK nothing ready (see ledger.py next-wave)")
 
 
@@ -655,6 +806,8 @@ def main():
     x = s.add_parser("reset-unit"); x.add_argument("uid"); x.set_defaults(f=cmd_reset)
     x = s.add_parser("close"); x.add_argument("--status", default="done"); x.set_defaults(f=cmd_close)
     x = s.add_parser("peek"); x.set_defaults(f=cmd_peek)
+    x = s.add_parser("recover"); x.add_argument("--force", action="store_true"); x.add_argument("--dry-run", action="store_true"); x.set_defaults(f=cmd_recover)
+    x = s.add_parser("checkpoint"); x.add_argument("uid"); x.add_argument("text"); x.set_defaults(f=cmd_checkpoint)
     x = s.add_parser("set-budget"); x.add_argument("usd", type=float, nargs="?"); x.add_argument("--ack-dry", action="store_true"); x.set_defaults(f=cmd_set_budget)
     x = s.add_parser("edit-unit"); x.add_argument("uid"); x.add_argument("--json", required=True); x.set_defaults(f=cmd_edit_unit)
     x = s.add_parser("remember"); x.add_argument("text"); x.set_defaults(f=cmd_remember)

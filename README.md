@@ -104,7 +104,24 @@ These follow the "harness" and "loop" levels of building with agents: the model 
 * **Skeptic step.** For findings that will drive decisions, the Planner adds a cheap Haiku step that tries to disprove each claim against its source before it's used. Research jobs get this with `batch.py --skeptic`, and downstream units read `summary.verified.md`. The threat model's evidence and verdict units already work this way.
 * **Project memory.** `.agents/PROJECT.md` (committed) holds conventions, where the standards live, and decisions. The Planner reads it at the start of every task, so you aren't asked the same things twice. At the end of a task the Orchestrator adds 2–6 lasting decisions with `ledger.py remember`. You can edit the file directly.
 
-### 7. Unattended runs (optional, untested)
+### 7. Picks up where it crashed or stopped
+Everything that matters is on disk, so a crash, a closed chat, a VS Code restart or a reboot loses at most the step in progress. Run `/next-wave` (in any chat, even days later) and it continues:
+
+* **Units cut off mid-way** are found at the start of the next turn. Anything still marked queued or running from an earlier turn, with no activity for `stale_after_min` (10 min), is put back in the queue with a **RESUME** note. The worker reads its own checkpoints (`ledger.py checkpoint` after each step), checks which outputs already exist and runs `git status`/`git diff` for partial edits, then continues instead of starting over. If the crash was only minutes ago, the Orchestrator asks whether another chat is still working before taking over (`ledger.py recover --force`). After 3 interruptions a unit is marked failed and you decide (usually: split it smaller).
+* **Crawls, Confluence pulls and document conversion** resume by re-running the same command: they keep their position on disk (SQLite frontier, Confluence cursor, per-file signatures).
+* **Leftover processes** from a crashed session (a crawl, a test run) are stopped at the next turn so they don't run unattended. The watchdog is restarted.
+* **A damaged ledger file** (crash in the middle of a write) falls back automatically to the last good copy, `ledger.json.bak`. Writes are atomic, and stale locks are broken after 2 minutes.
+* Questions, answers, the cost cap, spend so far and wave history all live in the ledger, so nothing has to be re-asked.
+
+### 8. PowerShell
+`memguard.py --pwsh '<code>'` runs PowerShell code, and `memguard.py --pwsh-file script.ps1 -- args` runs a script file. Both get the same safety check, memory cap, low priority and output limit as other commands.
+* It uses PowerShell 7 (`pwsh`) if installed, otherwise Windows PowerShell 5.1.
+* Code is sent as an encoded command, so the calling terminal can't mangle quotes or `$variables`, and execution policy, which only restricts `.ps1` files, doesn't block it. Very long scripts fall back to a temporary `.ps1` with `-ExecutionPolicy Bypass`. A company policy that locks execution policy could block that case only.
+* Errors stop the script with exit code 1 and the error message. A failing native program's exit code is passed through, and `exit N` works.
+* PowerShell-specific safety rules: no `Set-ExecutionPolicy`, no disk or partition commands, no machine-wide (HKLM) registry edits, no Defender or firewall changes, no `iex` of downloaded code, no recursive deletes of drives, system or profile folders, and no dumping of environment variables.
+* `doctor` checks it for real on your machine: output, exit code pass-through, and that errors stop the script.
+
+### 9. Unattended runs (optional, untested)
 VS Code has scheduled **Automations** since 1.137 (Agents window, setting `chat.automations.enabled`, on by default from 1.138). One can run **`/auto-next-wave`** every 30–60 minutes, so work continues without you typing `/next-wave`.
 * Each run starts with `ledger.py peek`, which changes nothing. If there's no work (questions waiting, memory paused, cost cap or no-progress stop, everything done), it replies with that one line and stops, so an idle run costs a few cents.
 * It never waits on a question. Questions are recorded and listed for you to answer when you're back.
@@ -227,6 +244,8 @@ memguard.py (every non-kit command): safety check + memory cap · next-wave: mem
 | `agents.default_budget_factor` | 1.5 | Default task cost cap = this × the plan's estimate |
 | `agents.max_waves_per_task` | 40 | Hard stop on waves per task |
 | `agents.verify_timeout_s` | 600 | Time limit for each verify command |
+| `agents.stale_after_min` | 10 | Idle time after which an unfinished unit from an earlier turn counts as interrupted |
+| `agents.max_attempts` | 3 | Interruptions before a unit is marked failed |
 
 ## Files
 

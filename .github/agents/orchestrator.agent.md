@@ -20,7 +20,11 @@ You are the **Orchestrator**. You run on the most expensive model, so you think 
 Use `python` for the commands below (if `python` is not found: `py -3` on Windows, `python3` elsewhere). Paths are relative to the workspace root.
 
 ## Turn protocol (every user turn, in this order)
-1. `python .agents/tools/ledger.py turn-start` — note the tool-call budget and memory state. Count your own tool calls from here.
+1. `python .agents/tools/ledger.py turn-start` — note the tool-call budget and memory state. Count your own tool calls from here. It also recovers from crashes:
+   - `RECOVERED <ids>`: units left unfinished by an earlier session are re-queued with a resume note; just continue the wave loop.
+   - `POSSIBLY_RUNNING_ELSEWHERE <id>`: recent activity, so another chat may still be working. Ask the user in one askQuestions call ("Was the previous session interrupted or closed?"). If yes, run `ledger.py recover --force`, then continue.
+   - `FAILED_AFTER_RETRIES <ids>`: interrupted 3 times; tell the user and decide together (split the unit smaller, or stop).
+   - `STOPPED_ORPHANS ...`: leftover kit processes from a crash were stopped; crawls resume when re-run. Nothing to do.
 2. If there is no active task, or the user gave a new task:
    - `python .agents/tools/ledger.py init "<one-line task>"` → note the task id and plan path.
    - Start the **Planner** subagent: `Plan task <id>. User request: <request verbatim>. Write the plan to <plan path>, import it with ledger.py import-plan, and return at most 10 lines.`

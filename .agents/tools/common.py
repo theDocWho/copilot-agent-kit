@@ -306,6 +306,13 @@ DENY_CMD = [
      "printing a secret into the chat context"),
     (r"(^|[;&|]\s*)\s*(printenv|env|set|Get-ChildItem\s+env:|gci\s+env:|dir\s+env:)\s*($|[;&|])",
      "dumping all environment variables (may contain secrets)"),
+    (r"\[(System\.)?Environment\]::GetEnvironmentVariables\(", "dumping all environment variables (may contain secrets)"),
+    (r"\b(Format-Volume|Clear-Disk|Initialize-Disk|Remove-Partition|Set-Partition)\b", "disk-level command"),
+    (r"\bSet-ExecutionPolicy\b", "changing PowerShell security policy"),
+    (r"\b(Set-MpPreference|Add-MpPreference|Disable-WindowsOptionalFeature|Set-NetFirewallProfile)\b", "changing Windows security settings"),
+    (r"\b(Set-ItemProperty|New-ItemProperty|Remove-ItemProperty|Remove-Item|New-Item)\b[^\n;|]*\b(HKLM|HKEY_LOCAL_MACHINE):", "editing machine-wide registry"),
+    (r"\b(iex|Invoke-Expression)\b[^\n]*(DownloadString|Invoke-WebRequest|iwr|irm|Invoke-RestMethod|Net\.WebClient)", "running code downloaded from the internet"),
+    (r"\b(Remove-Item|rm|ri|del)\b[^\n;|]*-Recurse[^\n;|]*(\$env:(USERPROFILE|SystemRoot|windir|ProgramFiles)|[A-Za-z]:\\(\s|$|['\"]))", "recursive delete of a system or profile folder"),
 ]
 
 
@@ -430,6 +437,28 @@ def split_text(text: str, max_chars: int) -> list[str]:
         parts.append("\n\n".join(cur))
     return parts
 
+
+# output piped into head / Select-Object -First: exit quietly instead of a traceback
+try:
+    import signal as _signal
+    if hasattr(_signal, "SIGPIPE"):
+        _signal.signal(_signal.SIGPIPE, _signal.SIG_DFL)
+except Exception:
+    pass
+_orig_hook = sys.excepthook
+
+
+def _quiet_broken_pipe(t, v, tb):
+    if issubclass(t, BrokenPipeError):
+        try:
+            sys.stdout = open(os.devnull, "w")
+        except Exception:
+            pass
+        os._exit(0)
+    _orig_hook(t, v, tb)
+
+
+sys.excepthook = _quiet_broken_pipe
 
 # every kit CLI run is one agent tool call: log it (hook-free call counting)
 _script = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ""

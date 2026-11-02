@@ -53,6 +53,20 @@ check(deny_reason("git push --force origin main") is not None, "memguard safety 
 r = subprocess.run([sys.executable, str(Path(__file__).with_name("memguard.py")), "--", sys.executable, "-c", "print('ok')"],
                    capture_output=True, text=True)
 check(r.returncode == 0 and "ok" in r.stdout, "memguard runs a command")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from memguard import find_powershell  # noqa: E402
+ps = find_powershell()
+if ps:
+    r = subprocess.run([sys.executable, str(Path(__file__).with_name("memguard.py")), "--timeout", "60", "--pwsh",
+                        "$x = 'o' + 'k'; Write-Output $x; cmd /c exit 3" if sys.platform == "win32" else "$x = 'o' + 'k'; Write-Output $x; exit 3"],
+                       capture_output=True, text=True)
+    check("ok" in r.stdout and r.returncode == 3, f"PowerShell via memguard ({ps}): output + exit code pass through",
+          f"got exit {r.returncode}: {(r.stdout or r.stderr).strip()[-200:]}")
+    r = subprocess.run([sys.executable, str(Path(__file__).with_name("memguard.py")), "--timeout", "60", "--pwsh",
+                        "Get-Item 'C:/definitely/not/here/x' | Out-Null; Write-Output 'should-not-print'"], capture_output=True, text=True)
+    check(r.returncode == 1 and "should-not-print" not in r.stdout, "PowerShell errors stop the script (exit 1)")
+else:
+    warn("PowerShell not found: memguard --pwsh unavailable (cmd/sh via --shell still works)")
 print("  INFO hooks are optional. If your org disables them, the guard and memory gate still work through "
       "memguard.py and ledger.py; only the extra per-tool telemetry is lost.")
 
