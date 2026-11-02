@@ -5,6 +5,7 @@ digest units, then add those units to the ledger (map -> reduce).
   batch.py --job docs --plan-only                         # show batch count / tokens, change nothing
   batch.py --job docs --add-units --question "What auth methods does the API support?"
   batch.py --job docs --source digests --round 2 --add-units   # reduce round when digests are still too big
+  batch.py --job docs --add-units --skeptic   # + a cheap Haiku unit that tries to disprove every claim in summary.md
 
 Each batch fits budget.json batching.max_tokens_per_batch and max_files_per_batch, so a
 Fetcher (Haiku) subagent reads it in one bounded context and writes one digest file.
@@ -60,6 +61,7 @@ def main():
     p.add_argument("--question", default="", help="what to extract (defaults to the task goal)")
     p.add_argument("--plan-only", action="store_true")
     p.add_argument("--add-units", action="store_true")
+    p.add_argument("--skeptic", action="store_true", help="add S-<job>: verify summary.md claims against the digests")
     a = p.parse_args()
     if a.source == "digests" and a.round < 2:
         a.round = 2
@@ -109,6 +111,19 @@ def main():
         "acceptance": "summary.md written OR next reduce round scheduled.",
         "est": {"calls": min(len(batches) + 4, 20), "ctx_ktok": min(len(batches) * 2 + 4, 40), "out_ktok": 3},
     })
+    if a.skeptic and a.round == 1:
+        verified = CACHE / a.job / "summary.verified.md"
+        units.append({
+            "id": f"S-{a.job}", "agent": "Fetcher", "depends_on": [f"R-{a.job}-*"],
+            "title": f"Skeptic check of {a.job} summary",
+            "instructions": (f"Read {rel(final)}. For EVERY claim, try to disprove it: find its support in the digests under "
+                             f"{rel(CACHE / a.job / 'digests')} (search, don't read everything). Write {rel(verified)} with only the "
+                             "claims that survive, each with its source, then a 'Rejected or unsupported' section listing the rest "
+                             "with the reason. Downstream units read summary.verified.md, not summary.md."),
+            "inputs": [rel(final)], "outputs": [rel(verified)],
+            "acceptance": "Every claim in summary.md is either kept with a source or listed as rejected/unsupported.",
+            "est": {"calls": 12, "ctx_ktok": 30, "out_ktok": 3},
+        })
     out_file = bdir / "units.json"
     save_json(out_file, units)
     if a.add_units:

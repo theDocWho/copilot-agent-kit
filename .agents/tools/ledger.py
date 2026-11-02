@@ -14,6 +14,15 @@ and any new chat session can resume exactly where the last one stopped.
   ledger.py add --json '{"id":"U09","title":"...","agent":"Implementer",...}'
   ledger.py orch --calls 5 --read-chars 6000 --wrote-chars 1500
   ledger.py show [--brief|--json]   ledger.py reset-unit U03   ledger.py close
+  ledger.py peek                                      # one-line state, changes nothing (for scheduled runs)
+  ledger.py set-budget 6.00                           # task cost cap in USD (default 1.5 x plan estimate)
+  ledger.py edit-unit U03 --json '{"verify": "pytest -q tests/test_x.py"}'
+  ledger.py remember "Decision: all services use mTLS (SEC-12)"   # append to .agents/PROJECT.md
+
+Gates (outside the model): `finish --status done` is accepted only if the unit's declared
+outputs exist and its `verify` commands pass. Brakes: next-wave stops on the turn budget,
+the task's USD cap (BUDGET_STOP), two waves in a row with nothing done (DRY_STOP),
+and agents.max_waves_per_task.
 """
 from __future__ import annotations
 
@@ -24,7 +33,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (STATE, budget, file_lock, fmt_usd, load_json, memory_snapshot,  # noqa: E402
+import gates  # noqa: E402
+from common import (AGENTS, STATE, budget, file_lock, fmt_usd, load_json, memory_snapshot,  # noqa: E402
                     model_for_agent, now_iso, pricing, rel, save_json, static_limits, turn_budget_calls, unit_cost)
 
 AGENTS_OK = {"Fetcher", "Implementer", "Reviewer", "Planner"}
@@ -103,6 +113,9 @@ def write_brief(tdir: Path, unit: dict, max_calls: int) -> Path:
     answers = tdir / "answers.md"
     refs = unit.get("skill") or []
     refs = refs if isinstance(refs, list) else [refs]
+    v = unit.get("verify")
+    v = [v] if isinstance(v, str) else (v or [])
+    verify_md = (" and these commands pass:\n" + "\n".join(f"- `{c}`" for c in v)) if v else "."
     skill_md = ""
     if refs:
         lines = []
@@ -127,6 +140,13 @@ Agent: **{unit['agent']}** ({model}) · Tool-call budget: **{min(calls + 3, max_
 
 ## Acceptance
 {unit.get('acceptance', 'Outputs exist and satisfy the instructions.')}
+
+## Done gate (checked by the kit, not by you)
+`finish --status done` is refused unless every output above exists and is non-empty{verify_md}
+Fix the cause and run finish again. Never weaken a test or a verify command to get past the gate.
+
+## Project memory
+`.agents/PROJECT.md` holds conventions and decisions from earlier tasks. Skim its headings; read only what applies.
 
 ## User decisions
 {'See ' + rel(answers) if answers.exists() else 'None recorded yet.'}
@@ -207,6 +227,9 @@ def cmd_import_plan(a):
         if plan.get("summary"):
             led["plan_summary"] = plan["summary"]
         led["status"] = "running"
+        if not led.get("budget_usd"):
+            total = sum(x["est_cost"]["usd"] for x in led["units"].values())
+            led["budget_usd"] = round(max(0.5, total * budget().get("agents", {}).get("default_budget_factor", 1.5)), 2)
         return led
 
     led = mutate(fn)
@@ -216,7 +239,13 @@ def cmd_import_plan(a):
         by_model[m] = by_model.get(m, 0) + u["est_cost"]["usd"]
     total = sum(by_model.values())
     print(f"IMPORTED {len(units)} units. Expected cost {fmt_usd(total)} ({total / pr.get('credit_usd', .01):.0f} credits): "
-          + ", ".join(f"{k} {fmt_usd(v)}" for k, v in sorted(by_model.items())))
+          + ", ".join(f"{k} {fmt_usd(v)}" for k, v in sorted(by_model.items()))
+          + f". Task cost cap {fmt_usd(led['budget_usd'])} (ask the user to confirm or change it; ledger.py set-budget).")
+    for w in gates.fake_edges(led["units"]):
+        print(w)
+    nov = [u["id"] for u in led["units"].values() if u["agent"] == "Implementer" and not u.get("verify")]
+    if nov:
+        print(f"NO_VERIFY: Implementer units without a verify command: {', '.join(nov)} (add the narrowest test/lint/build).")
     pend = [q for q in led["questions"] if not q.get("answer")]
     if pend:
         print("ASK_USER_NOW (one askQuestions call, all at once):")
@@ -291,6 +320,15 @@ def cmd_next_wave(a):
             return ("BLOCKED_ON_QUESTIONS", [])
         if mem["state"] == "PAUSE":
             return ("MEMORY_PAUSE", [])
+        # ---- brakes -------------------------------------------------------------
+        if len(led["waves"]) >= ab.get("max_waves_per_task", 40):
+            return ("WAVE_LIMIT", [])
+        finished_waves = [w for w in led["waves"] if len(w.get("results", {})) == len(w["units"])]
+        last2 = finished_waves[-2:]
+        if len(last2) == 2 and all("done" not in w["results"].values() for w in last2) \
+                and not led.get("dry_ack_wave", 0) >= last2[-1]["n"]:
+            return ("DRY_STOP", [])
+        spent = spent_usd(led)
         t = led.setdefault("turn", {"budget": turn_budget_calls(), "used": 0})
         remaining = t["budget"] - t["used"] - orch_cost
         ready = [u for u in units.values() if u["status"] == "pending" and deps_done(u, units)]
@@ -302,6 +340,10 @@ def cmd_next_wave(a):
                 break
             picked.append(u)
             spend += c
+        cap = led.get("budget_usd")
+        if picked and cap and spent + sum(u["est_cost"]["usd"] for u in picked) > cap:
+            led["budget_hit"] = {"spent": round(spent, 3), "cap": cap, "at": now_iso()}
+            return ("BUDGET_STOP", picked)
         if not picked:
             active = [u for u in units.values() if u["status"] in ("queued", "running")]
             if active:
@@ -342,6 +384,16 @@ def cmd_next_wave(a):
             print("blocked -> ask the pending questions (ledger.py questions) in ONE askQuestions call, then `answer`;"
                   " failed -> decide: reset-unit <ID> (retry) or add a smaller replacement unit;"
                   " split -> make sure follow-up units were added, then mark the original skipped via finish --status skipped.")
+    elif status == "BUDGET_STOP":
+        led = load()
+        need = sum(u["est_cost"]["usd"] for u in units)
+        print(f"Spent ~{fmt_usd(led['budget_hit']['spent'])} of the {fmt_usd(led['budget_hit']['cap'])} cap; the next wave needs"
+              f" ~{fmt_usd(need)}. Ask the user (askQuestions): raise the cap (ledger.py set-budget <usd>), reduce scope, or stop.")
+    elif status == "DRY_STOP":
+        print("Two waves in a row finished nothing (all failed/blocked/split). Stop and ask the user how to proceed;"
+              " after deciding, run `ledger.py set-budget --ack-dry` or reset/replace the stuck units.")
+    elif status == "WAVE_LIMIT":
+        print("agents.max_waves_per_task reached. Checkpoint and ask the user whether to continue (raise the limit in budget.json).")
     elif status == "NOTHING_READY":
         for u in units[:8]:
             print(f"  {u['id']} waits on {', '.join(u['depends_on'])}")
@@ -361,6 +413,25 @@ def cmd_start(a):
 
 def cmd_finish(a):
     pr = pricing()
+    if a.status == "done":
+        u0 = load()["units"].get(a.uid) or sys.exit(f"No unit {a.uid}")
+        ok, report = gates.verify_unit(u0)
+        if not ok:
+            def bump(led):
+                u = led["units"][a.uid]
+                u["verify_failures"] = u.get("verify_failures", 0) + 1
+                if u["verify_failures"] >= 3:
+                    u["status"], u["finished"] = "failed", now_iso()
+                    u["result"] = {"summary": "done-gate failed 3 times: " + report[0][:300]}
+                    record_wave_result(led, u)
+                return u["verify_failures"]
+            n = mutate(bump)
+            print("\n".join(report))
+            print(f"VERIFY_FAILED ({n}/3): unit {a.uid} NOT accepted as done. Fix the cause and run finish again."
+                  + ("" if n < 3 else " Third failure: unit marked failed for the orchestrator.")
+                  + " Do not weaken tests or verify commands.")
+            sys.exit(2)
+        print("\n".join(report))
 
     def fn(led):
         u = led["units"].get(a.uid) or sys.exit(f"No unit {a.uid}")
@@ -370,6 +441,7 @@ def cmd_finish(a):
         u["actual"] = {"calls": a.calls, "read_chars": a.read_chars, "wrote_chars": a.wrote_chars}
         u["result"] = {"summary": (a.summary or "")[:400]}
         u["actual_cost"] = actual_for(u, pr)
+        record_wave_result(led, u)
         if a.status == "blocked":
             qid = f"Q{len(led['questions']) + 1}"
             led["questions"].append({"id": qid, "unit": a.uid, "question": a.question or a.summary or "?",
@@ -382,6 +454,111 @@ def cmd_finish(a):
     u = mutate(fn)
     c = u.get("actual_cost") or {}
     print(f"FINISHED {a.uid} status={a.status} est={fmt_usd(u['est_cost']['usd'])} actual~{fmt_usd(c.get('usd', 0))}")
+
+
+def record_wave_result(led: dict, u: dict) -> None:
+    """Remember how each unit of a wave ended, so retries/resets don't hide a dry wave."""
+    for w in led.get("waves", []):
+        if w["n"] == u.get("wave") and u["id"] in w["units"]:
+            w.setdefault("results", {})[u["id"]] = u["status"]
+
+
+def spent_usd(led: dict) -> float:
+    pr = pricing()
+    s = sum((u.get("actual_cost") or {}).get("usd", 0) for u in led["units"].values())
+    o = led.get("orch", [])
+    if o:
+        cpt = budget().get("batching", {}).get("chars_per_token", 4)
+        s += unit_cost(model_for_agent("Orchestrator", pr), sum(x["calls"] for x in o),
+                       sum(x["read_chars"] + x["wrote_chars"] for x in o) / cpt, sum(x["wrote_chars"] for x in o) / cpt, pr)["usd"]
+    return s
+
+
+def cmd_peek(a):
+    """One line, no changes: lets a scheduled run end immediately when there is nothing to do."""
+    act = load_json(STATE / "active.json", {}) or {}
+    if not act.get("task_id") or not ledger_path(act["task_id"]).exists():
+        print("NO_TASK"); return
+    led = load()
+    if led.get("status") in ("done", "closed"):
+        print("IDLE task closed"); return
+    units = led["units"]
+    if any(q for q in led["questions"] if not q.get("answer")):
+        print("WAITING_QUESTIONS " + ", ".join(q["id"] for q in led["questions"] if not q.get("answer"))); return
+    mem = memory_snapshot()
+    if mem["state"] == "PAUSE":
+        print("MEMORY_PAUSE " + "; ".join(mem["reasons"])); return
+    if led.get("budget_hit") and spent_usd(led) >= led.get("budget_usd", 0) * 0.99:
+        print("BUDGET_STOP"); return
+    if units and all(u["status"] in DONE for u in units.values()):
+        print("ALL_DONE"); return
+    fw = [w for w in led["waves"] if len(w.get("results", {})) == len(w["units"])][-2:]
+    if len(fw) == 2 and all("done" not in w["results"].values() for w in fw) and not led.get("dry_ack_wave", 0) >= fw[-1]["n"]:
+        print("DRY_STOP needs the user"); return
+    ready = [u for u in units.values() if u["status"] == "pending" and deps_done(u, units)]
+    running = [u for u in units.values() if u["status"] in ("queued", "running")]
+    if ready:
+        print(f"WORK_READY {len(ready)} units"); return
+    print(f"IDLE {len(running)} running, nothing ready" if running else "STUCK nothing ready (see ledger.py next-wave)")
+
+
+def cmd_set_budget(a):
+    def fn(led):
+        if a.usd is not None:
+            led["budget_usd"] = round(a.usd, 2)
+            led.pop("budget_hit", None)
+        if a.ack_dry:
+            led["dry_ack_wave"] = len(led["waves"])
+        return led.get("budget_usd")
+    cap = mutate(fn)
+    print(f"BUDGET {fmt_usd(cap or 0)} spent~{fmt_usd(spent_usd(load()))}" + (" (dry-stop acknowledged)" if a.ack_dry else ""))
+
+
+def cmd_edit_unit(a):
+    allowed = {"verify", "instructions", "est", "inputs", "outputs", "acceptance", "edge_reasons", "depends_on"}
+    patch = json.loads(a.json)
+    bad = set(patch) - allowed
+    if bad:
+        sys.exit(f"Cannot edit {sorted(bad)}; allowed: {sorted(allowed)}")
+    max_calls = budget().get("agents", {}).get("max_calls_per_unit", 25)
+
+    def fn(led):
+        u = led["units"].get(a.uid) or sys.exit(f"No unit {a.uid}")
+        if u["status"] in ("running", "done"):
+            sys.exit(f"Unit {a.uid} is {u['status']}; edit only pending/failed units (reset-unit first).")
+        u.update(patch)
+        normalize_unit(u, max_calls)
+        u["est_cost"] = est_for(u, pricing())
+        u["brief"] = rel(write_brief(task_dir(led["id"]), u, max_calls))
+        u.setdefault("edits", []).append({"at": now_iso(), "fields": sorted(patch)})
+    mutate(fn)
+    print(f"EDITED {a.uid}: {', '.join(sorted(patch))}")
+
+
+PROJECT_TEMPLATE = """# Project memory
+
+Read by the Planner at the start of every task. Keep it short (under ~2 pages): consolidate
+instead of appending forever. Humans can edit it directly; it is committed with the repo.
+
+## Conventions
+- (stack, coding conventions, test commands, folders that matter)
+
+## Standards and sources
+- (where the internal standards, Confluence spaces and design docs live)
+
+## Decisions
+"""
+
+
+def cmd_remember(a):
+    p = AGENTS / "PROJECT.md"
+    if not p.exists():
+        p.write_text(PROJECT_TEMPLATE, encoding="utf-8")
+    tid = (load_json(STATE / "active.json", {}) or {}).get("task_id", "-")
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(f"- {now_iso()[:10]} [{tid}] {a.text.strip()}\n")
+    size = p.stat().st_size
+    print(f"REMEMBERED in {rel(p)} ({size} bytes)" + ("  ⚠ over 12 KB: consolidate older decisions" if size > 12000 else ""))
 
 
 def cmd_add(a):
@@ -401,7 +578,11 @@ def cmd_add(a):
             led["units"][u["id"]] = u
             added.append(u["id"])
         return added
-    print("ADDED " + ", ".join(mutate(fn)))
+    added = mutate(fn)
+    print("ADDED " + ", ".join(added))
+    for w in gates.fake_edges(load()["units"]):
+        if w.split()[1] in added:
+            print(w)
 
 
 def cmd_orch(a):
@@ -426,7 +607,8 @@ def cmd_close(a):
     def fn(led):
         led["status"], led["closed"] = a.status, now_iso()
     mutate(fn)
-    print(f"CLOSED {active_id()} status={a.status}. Run cost.py report for the final cost comparison.")
+    print(f"CLOSED {active_id()} status={a.status}. Run cost.py report for the final cost comparison, and save 2-6 durable"
+          " decisions/conventions with `ledger.py remember \"...\"` (skip one-off answers).")
 
 
 def cmd_show(a):
@@ -443,6 +625,8 @@ def cmd_show(a):
     pend = [q for q in led["questions"] if not q.get("answer")]
     if pend:
         print(f"pending questions: {', '.join(q['id'] for q in pend)}")
+    if led.get("budget_usd"):
+        print(f"cost: spent~{fmt_usd(spent_usd(led))} of cap {fmt_usd(led['budget_usd'])}")
     if a.brief:
         return
     for u in sorted(led["units"].values(), key=lambda x: x["id"]):
@@ -470,6 +654,10 @@ def main():
     x.add_argument("--wrote-chars", type=int, default=0); x.add_argument("--note", default=""); x.set_defaults(f=cmd_orch)
     x = s.add_parser("reset-unit"); x.add_argument("uid"); x.set_defaults(f=cmd_reset)
     x = s.add_parser("close"); x.add_argument("--status", default="done"); x.set_defaults(f=cmd_close)
+    x = s.add_parser("peek"); x.set_defaults(f=cmd_peek)
+    x = s.add_parser("set-budget"); x.add_argument("usd", type=float, nargs="?"); x.add_argument("--ack-dry", action="store_true"); x.set_defaults(f=cmd_set_budget)
+    x = s.add_parser("edit-unit"); x.add_argument("uid"); x.add_argument("--json", required=True); x.set_defaults(f=cmd_edit_unit)
+    x = s.add_parser("remember"); x.add_argument("text"); x.set_defaults(f=cmd_remember)
     x = s.add_parser("show"); x.add_argument("--brief", action="store_true"); x.add_argument("--json", action="store_true"); x.set_defaults(f=cmd_show)
     a = p.parse_args()
     a.f(a)

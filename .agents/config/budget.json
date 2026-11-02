@@ -54,6 +54,9 @@
     "turn_budget_pct": 60,
     "max_calls_per_unit": 25,
     "orchestrator_calls_per_wave": 6,
-    "_note": "turn budget = max_requests_setting * turn_budget_pct/100 tool calls per chat turn, counting the orchestrator and all subagents it starts. next-wave never schedules past it, so the 'Continue?' prompt never fires mid-wave."
+    "_note": "turn budget = max_requests_setting * turn_budget_pct/100 tool calls per chat turn, counting the orchestrator and all subagents it starts. next-wave never schedules past it, so the 'Continue?' prompt never fires mid-wave.",
+    "default_budget_factor": 1.5,
+    "max_waves_per_task": 40,
+    "verify_timeout_s": 600
   }
 }

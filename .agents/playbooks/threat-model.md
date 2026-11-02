@@ -31,14 +31,14 @@ Blocking: Q-SCOPE, Q-STD, Q-CRED (only if Confluence is used). Others have defau
 Images that no parser can read: add one Implementer unit only if your Copilot models accept image input; otherwise add a question asking the user for a text description or the source `.drawio`.
 
 ## Phase 2 — System model
-Depends on every Phase 1 unit **and** on `R-<job>-*` for each knowledge-base job (the digest/reduce units the gather units add at run time), e.g. `["G-CODE-api", "G-CONF-ARCH", "R-kb-conf-ARCH-*", "G-DOCS", "R-kb-docs-*", "G-STD", "R-kb-standards-*", "G-IMG"]`.
+Depends on every Phase 1 unit **and** on `R-<job>-*` for each knowledge-base job (the digest/reduce units the gather units add at run time), e.g. `["G-CODE-api", "G-CONF-ARCH", "R-kb-conf-ARCH-*", "G-DOCS", "R-kb-docs-*", "G-IMG"]`. Not on G-STD: the model never reads the standards, so that edge would only make it wait. The standards catalog is needed in Phase 4, so C-EVID units depend on `R-kb-standards-*`.
 | Unit | Agent | What | Output |
 |---|---|---|---|
-| M-MODEL | Implementer | Build the system model from the inventories and summaries only: components, data stores, external entities, data flows (Mermaid DFD), trust boundaries, data classification, assets. Every element cites its sources. **List conflicts** between docs and code ("HLD says mTLS, code uses plain HTTP") — these are findings. | `threat-model/system-model.md` |
+| M-MODEL | Implementer | (verify: `check_md.py threat-model/system-model.md --sections "Components,Data flows,Trust boundaries" --mermaid --citations 5`) Build the system model from the inventories and summaries only: components, data stores, external entities, data flows (Mermaid DFD), trust boundaries, data classification, assets. Every element cites its sources. **List conflicts** between docs and code ("HLD says mTLS, code uses plain HTTP") — these are findings. | `threat-model/system-model.md` |
 | M-REVIEW | Reviewer | Check the model against the sources it cites (spot-check 3–5), missing boundaries, wrong flows. PASS or fix units. Small input → cheap Opus. | review file |
 
 ## Phase 3 — Threats (parallel per group, depends on M-REVIEW)
-Groups are only known once the model exists, so **M-MODEL creates the Phase 3–4 units**: it splits the model into groups of ≤ 5 elements or one trust boundary each and adds `T-<group>`, `C-EVID-<group>` (depends on `T-<group>`) and `C-JUDGE-<group>` (depends on `C-EVID-<group>`) with `ledger.py add`, then mentions the group list in its notes. T units also depend on M-REVIEW.
+Groups are only known once the model exists, so **M-MODEL creates the Phase 3–4 units**: it splits the model into groups of ≤ 5 elements or one trust boundary each and adds `T-<group>`, `C-EVID-<group>` (depends on `T-<group>` and `R-kb-standards-*`) and `C-JUDGE-<group>` (depends on `C-EVID-<group>`) with `ledger.py add`, then mentions the group list in its notes. T units also depend on M-REVIEW.
 | Unit | Agent | What | Output |
 |---|---|---|---|
 | T-<group> | Implementer | Enumerate threats per element and flow with the skill's method. Table: ID, element/flow, category, threat, attack path, preconditions, impact, controls observed (with citation), initial likelihood × impact. No credibility verdicts yet. ≤ 18 calls. | `threat-model/threats/<group>.md` |
@@ -54,7 +54,7 @@ This split is where the cost saving comes from: Haiku does the searching, and Op
 ## Phase 5 — Report
 | Unit | Agent | What | Output |
 |---|---|---|---|
-| R-REPORT (depends on `"C-JUDGE-*"`) | Implementer | Assemble the report in the skill's template: scope, assumptions, system model + DFD, threats sorted by residual risk with verdicts, gaps against standards (std ID → threat → recommended control), doc/code conflicts, open questions, sources (Confluence URLs with version, file paths). | `threat-model/THREAT_MODEL.md` |
+| R-REPORT (depends on `"C-JUDGE-*"`; verify: `check_md.py threat-model/THREAT_MODEL.md --sections "Scope,Threats,Gaps,Sources" --min-words 800 --citations 10`) | Implementer | Assemble the report in the skill's template: scope, assumptions, system model + DFD, threats sorted by residual risk with verdicts, gaps against standards (std ID → threat → recommended control), doc/code conflicts, open questions, sources (Confluence URLs with version, file paths). | `threat-model/THREAT_MODEL.md` |
 | FINAL-REVIEW | Reviewer | Check against the original request and the skill's quality bar. | review file |
 
 ## Budget hints (estimates for the plan)

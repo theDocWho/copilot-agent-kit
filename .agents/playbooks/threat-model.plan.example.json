@@ -129,7 +129,10 @@
         "calls": 12,
         "ctx_ktok": 10,
         "out_ktok": 3
-      }
+      },
+      "inputs": [
+        ".agents/cache/*/images.json"
+      ]
     },
     {
       "id": "M-MODEL",
@@ -151,11 +154,9 @@
         "R-kb-conf-ARCH-*",
         "G-DOCS",
         "R-kb-docs-*",
-        "G-STD",
-        "R-kb-standards-*",
         "G-IMG"
       ],
-      "instructions": "From the inventories, diagrams.md and the summary.md files only, write the system model (components, stores, external entities, Mermaid DFD, trust boundaries, data classification, assets), citing sources and listing doc/code conflicts. Then split it into groups (<=5 elements or one trust boundary) and add per group with ledger.py add: T-<group> (Implementer, depends on M-REVIEW), C-EVID-<group> (Fetcher, depends on T-<group>), C-JUDGE-<group> (Reviewer, depends on C-EVID-<group>), using the playbook's Phase 3-4 instructions and estimates.",
+      "instructions": "From the inventories, diagrams.md and the summary.md files only, write the system model (components, stores, external entities, Mermaid DFD, trust boundaries, data classification, assets), citing sources and listing doc/code conflicts. Then split it into groups (<=5 elements or one trust boundary) and add per group with ledger.py add: T-<group> (Implementer, depends on M-REVIEW), C-EVID-<group> (Fetcher, depends on T-<group> and \"R-kb-standards-*\"), C-JUDGE-<group> (Reviewer, depends on C-EVID-<group>), using the playbook's Phase 3-4 instructions and estimates.",
       "inputs": [
         "threat-model/inventory/",
         ".agents/cache/kb-conf-ARCH/summary.md",
@@ -168,7 +169,10 @@
         "calls": 18,
         "ctx_ktok": 45,
         "out_ktok": 10
-      }
+      },
+      "verify": [
+        "python .agents/tools/check_md.py threat-model/system-model.md --sections \"Components,Data flows,Trust boundaries\" --mermaid --citations 5"
+      ]
     },
     {
       "id": "M-REVIEW",
@@ -225,7 +229,10 @@
         "calls": 12,
         "ctx_ktok": 40,
         "out_ktok": 10
-      }
+      },
+      "verify": [
+        "python .agents/tools/check_md.py threat-model/THREAT_MODEL.md --sections \"Scope,Threats,Gaps,Sources\" --min-words 800 --citations 10"
+      ]
     },
     {
       "id": "FINAL-REVIEW",

@@ -94,6 +94,22 @@ Same work with every agent on Opus ≈ $4.06 → routing saved ≈ $1.81 (45%)
 
 ---
 
+### 6. Gates and brakes that run outside the model
+These follow the "harness" and "loop" levels of building with agents: the model never decides alone that it's finished, or that it should keep spending.
+
+* **Done gate.** `ledger.py finish --status done` is accepted only if every declared output exists and isn't empty, and every command in the unit's `verify` list passes (run through memguard). `VERIFY_FAILED` sends the worker back to fix the cause, and the third failure marks the unit failed for the Orchestrator. It needs no hooks. The Planner gives every Implementer unit a `verify` command (the narrowest test, lint or build), and `import-plan` flags any it missed. For documents, `check_md.py` checks required sections, word count, citations, a Mermaid diagram and leftover TODOs.
+* **Cost cap.** Each task gets a cap: by default 1.5 × the plan's estimate, confirmed or changed by you in the first question form. `next-wave` returns `BUDGET_STOP` before a wave that would cross it, and only you can raise it (`ledger.py set-budget`).
+* **No-progress stop.** If two waves in a row finish nothing (everything failed, blocked or split), `next-wave` returns `DRY_STOP` and the Orchestrator asks you instead of retrying forever. There's also a hard limit on waves per task (`agents.max_waves_per_task`).
+* **Only real dependencies.** A unit should wait for another only if it reads that unit's output. `import-plan` warns `FAKE_EDGE?` otherwise, because a needless dependency makes work wait for nothing. It caught one in the threat-model example: the system model was waiting on the standards catalog it never reads.
+* **Skeptic step.** For findings that will drive decisions, the Planner adds a cheap Haiku step that tries to disprove each claim against its source before it's used. Research jobs get this with `batch.py --skeptic`, and downstream units read `summary.verified.md`. The threat model's evidence and verdict units already work this way.
+* **Project memory.** `.agents/PROJECT.md` (committed) holds conventions, where the standards live, and decisions. The Planner reads it at the start of every task, so you aren't asked the same things twice. At the end of a task the Orchestrator adds 2–6 lasting decisions with `ledger.py remember`. You can edit the file directly.
+
+### 7. Unattended runs (optional, untested)
+VS Code has scheduled **Automations** since 1.137 (Agents window, setting `chat.automations.enabled`, on by default from 1.138). One can run **`/auto-next-wave`** every 30–60 minutes, so work continues without you typing `/next-wave`.
+* Each run starts with `ledger.py peek`, which changes nothing. If there's no work (questions waiting, memory paused, cost cap or no-progress stop, everything done), it replies with that one line and stops, so an idle run costs a few cents.
+* It never waits on a question. Questions are recorded and listed for you to answer when you're back.
+* I haven't been able to test whether Automations accept custom agents and the Local harness, or what your org's policy allows. Try it once on a small task before relying on it.
+
 ## Locked-down environments
 
 | Constraint | What the kit does |
@@ -185,7 +201,9 @@ Only the standard library is used, except for PDFs. Files are processed one at a
                │           ─► Reviewer (Opus)      git diff + tests ─► reviews/<unit>.md (+ fix units)
                │   BLOCKED ─► one askQuestions batch
                │   END_TURN / MEMORY_PAUSE ─► checkpoint, "run /next-wave"
-               └─ ALL_DONE ─► final review ─► cost.py report ─► ledger.py close
+               │   BUDGET_STOP / DRY_STOP ─► ask you
+               │   worker finish ─► done gate: outputs exist + verify commands pass
+               └─ ALL_DONE ─► final review ─► cost.py report ─► ledger.py close ─► remember decisions
 memguard.py (every non-kit command): safety check + memory cap · next-wave: memory gate · no hooks required
 ```
 
@@ -206,17 +224,21 @@ memguard.py (every non-kit command): safety check + memory cap · next-wave: mem
 | `agents.turn_budget_pct` | 60 | Share of the request limit one turn may use |
 | `agents.max_parallel_subagents` | 3 | Units per wave. Lower it to save memory |
 | `agents.max_calls_per_unit` | 25 | Hard limit on unit size |
+| `agents.default_budget_factor` | 1.5 | Default task cost cap = this × the plan's estimate |
+| `agents.max_waves_per_task` | 40 | Hard stop on waves per task |
+| `agents.verify_timeout_s` | 600 | Time limit for each verify command |
 
 ## Files
 
 ```
 .github/agents/*.agent.md     the 6 agents (model pinned per agent)
-.github/prompts/*.prompt.md   /run-task, /next-wave, /status, /cost-report, /kit-check
+.github/prompts/*.prompt.md   /run-task, /next-wave, /status, /cost-report, /kit-check, /auto-next-wave
 .github/hooks/agent-kit.json  optional hooks (extra guard + telemetry) -> .agents/tools/hooks.py
 .github/copilot-instructions.md   shared rules (files not chat, budgets, questions)
+.agents/PROJECT.md            project memory: conventions, standards locations, decisions (committed)
 .agents/config/               budget.json, pricing.json
 .agents/playbooks/            task playbooks (threat-model.md + example plan)
-.agents/tools/                ledger, skills, crawl, confluence, convert, batch, memguard, memprobe, watchdog, status, cost, hooks, doctor (stdlib only; psutil optional)
+.agents/tools/                ledger, gates, check_md, skills, crawl, confluence, convert, batch, memguard, memprobe, watchdog, status, cost, hooks, doctor (stdlib only; psutil optional)
 .agents/state/  (runtime)     active task, ledgers, unit briefs, notes, reviews, call log, progress
 .agents/cache/  (runtime)     crawled pages, batches, digests, summary.md
 ```
