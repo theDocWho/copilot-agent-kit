@@ -29,7 +29,7 @@ def sources(job: str, source: str, rnd: int) -> list[tuple[str, int]]:
         if not db.exists():
             sys.exit(f"No crawl db for job {job}. Run crawl.py first.")
         con = sqlite3.connect(db)
-        rows = con.execute("SELECT file, chars FROM urls WHERE status='done' AND file IS NOT NULL AND chars > 200 ORDER BY depth, rowid").fetchall()
+        rows = con.execute("SELECT file, chars FROM urls WHERE status='done' AND file IS NOT NULL AND chars > 40 ORDER BY depth, rowid").fetchall()
         return [(f, c) for f, c in rows if (ROOT / f).exists()]
     d = jd / "digests" / f"r{rnd - 1}"
     files = sorted(d.glob("*.md")) if d.exists() else []

@@ -29,6 +29,11 @@ print(f"agent kit doctor — workspace {ROOT}")
 check(sys.version_info >= (3, 9), f"python {sys.version.split()[0]} (need 3.9+)")
 check(psutil is not None, "psutil installed (memory measurement + caps)", "pip install psutil")
 check(shutil.which("git") is not None, "git on PATH (Reviewer uses git diff)")
+try:
+    import pypdf  # noqa: F401
+    print("  OK   pypdf installed (PDF text for convert.py)")
+except ImportError:
+    print("  WARN pypdf missing -> convert.py cannot read PDFs" + (" (pdftotext found, will use it)" if shutil.which("pdftotext") else " (pip install pypdf)"))
 for a in ("orchestrator", "planner", "fetcher", "implementer", "reviewer", "monitor"):
     f = ROOT / ".github" / "agents" / f"{a}.agent.md"
     check(f.exists(), f".github/agents/{a}.agent.md")

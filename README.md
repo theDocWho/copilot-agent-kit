@@ -18,7 +18,7 @@ Give it any task. **Opus plans and reviews, Sonnet implements, Haiku fetches, cr
 ## Install (about 5 minutes)
 
 1. Copy `.github/`, `.agents/` and `.vscode/tasks.json` into the root of your workspace. **Merge** `.vscode/settings.json` into your existing settings rather than overwriting them.
-2. Run `pip install psutil`. It is the only dependency, and memory measurement and caps need it. Playwright is optional and only used by `--render` for JavaScript-heavy sites.
+2. Run `pip install psutil pypdf`. psutil is needed for memory measurement and caps, and pypdf for PDF text. Playwright is optional and only used by `--render` for JavaScript-heavy sites.
 3. Run **Terminal → Run Task → "Agents: doctor (check setup)"**. Every line should be OK.
 4. Open the model picker and check the model names. The agents pin `Claude Opus 5.5`, `Claude Sonnet 5.5` and `Claude Haiku 4.5`. If your org shows different labels, edit the `model:` line in each `.github/agents/*.agent.md`.
 5. In the chat permissions picker choose **Allow all**, or type `/yolo`. **Don't use Autopilot**: Autopilot answers blocking questions by itself, and this kit is built to bring every question to you.
@@ -116,6 +116,24 @@ python .agents/tools/crawl.py --job portal --seeds https://portal/docs/ --cookie
 ```
 `--auth-env` takes a token (`Bearer x`, `user:token` for Basic, or a raw token, sent as Bearer). `--cookie-env` reuses a browser session cookie for SSO-only sites: copy the `Cookie` request header from your browser's dev tools into the variable.
 
+### Documents: design docs, infrastructure docs, standards, diagrams
+```
+python .agents/tools/convert.py --job kb-hld --inputs docs/hld/ "specs/**/*.docx" infra/network.pdf
+python .agents/tools/convert.py --job kb-arch-att --inputs .agents/cache/kb-arch/attachments   # Confluence attachments
+```
+| Format | What you get |
+|---|---|
+| `.docx` | Paragraphs in order, tables as `\| a \| b \|` rows, headers and footers |
+| `.pptx` | `## Slide N`, slide text and speaker notes |
+| `.xlsx` | `## Sheet: name`, one row per line (up to 2,000 rows per sheet) |
+| `.pdf` | `## Page N` text (needs `pip install pypdf` or the `pdftotext` CLI; scanned PDFs need OCR) |
+| `.drawio` (plain or compressed), `.vsdx`, `.svg` | Containers/zones, elements and connections, e.g. `API Gateway -> payments-db : JDBC/TLS` |
+| `.html`, `.md`, `.txt`, `.json`, `.yaml`, `.tf`, … | Text as is |
+| Images (`.png`, `.jpg`, …) | Not converted. They're listed in `.agents/cache/<job>/images.json` for the diagram step (your diagram-to-dsl skill, or a model that can see images) |
+| Legacy `.doc/.ppt/.xls/.vsd` | Reported as failed with "save as .docx/.pptx/…" |
+
+Only the standard library is used, except for PDFs. Files are processed one at a time, long documents are split into parts (never truncated), and re-runs skip unchanged files, so you can point it at a growing folder.
+
 ---
 
 ## Flow
@@ -159,7 +177,7 @@ guard hook (every tool call): blocks destructive commands, bulk fetching, and ne
 .github/hooks/agent-kit.json  guard + telemetry hooks -> .agents/tools/hooks.py
 .github/copilot-instructions.md   shared rules (files not chat, budgets, questions)
 .agents/config/               budget.json, pricing.json
-.agents/tools/                ledger, crawl, confluence, batch, memguard, status, cost, hooks, doctor (stdlib + psutil)
+.agents/tools/                ledger, crawl, confluence, convert, batch, memguard, status, cost, hooks, doctor (stdlib + psutil)
 .agents/state/  (runtime)     active task, ledgers, unit briefs, notes, reviews, hook log, progress
 .agents/cache/  (runtime)     crawled pages, batches, digests, summary.md
 ```
