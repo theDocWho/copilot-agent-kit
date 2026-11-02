@@ -338,6 +338,8 @@ def main():
     images_path = CACHE / a.job / "images.json"
     images = {i["path"]: i for i in (json.loads(images_path.read_text()) if images_path.exists() else [])}
     progress = STATE / "progress" / f"crawl-{a.job}.jsonl"
+    import memprobe
+    memprobe.lower_priority()
     register_worker(os.getpid(), f"convert:{a.job}")
     start, status = time.time(), "complete"
     counts = {"converted": 0, "unchanged": 0, "images": 0, "failed": 0}

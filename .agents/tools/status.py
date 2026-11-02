@@ -90,9 +90,18 @@ def build(brief: bool) -> list[str]:
         live = last and now - last < 30 and e.get("event") != "slice_end"
         L.append(f"crawl {pf.stem[6:]}: {'RUNNING' if live else e.get('status', 'idle')} done={e.get('done', e.get('page_parts'))} "
                  f"queued={e.get('queued')} failed={e.get('failed')} rate={e.get('rate_pps', '-')}/s ({ago(last)} ago)")
-    L.append(f"memory: {mem['state']} — VS Code {mem['vscode_mb']}MB + workers {mem['workers_mb']}MB = "
-             f"{mem['used_pct']}% of {mem['total_budget_mb']}MB" + ("  ⚠ open a NEW chat to free VS Code memory" if mem["vscode_over_soft_limit"] else "")
-             + (f"  [via {mem['backend']}]" if mem["state"] != "UNMEASURED" else "  [not measurable here: static limits in use]"))
+    if mem["state"] == "UNMEASURED":
+        L.append("memory: not measurable here — static limits in use")
+    else:
+        L.append(f"memory: {mem['state']} — RAM free {mem['ram_available_mb']} MB ({mem['ram_available_pct']}%)"
+                 + (f", commit {mem['commit_pct']}%" if mem.get("commit_pct") is not None else "")
+                 + f" | VS Code {mem['vscode_mb']} MB (+{mem['vscode_growth_mb']} this task) | kit workers {mem['workers_mb']} MB"
+                 + (f"  ⚠ {'; '.join(mem['reasons'])}" if mem["reasons"] else "")
+                 + ("  → open a NEW chat to free VS Code memory" if mem["new_chat_recommended"] else ""))
+    wd = STATE / "watchdog.jsonl"
+    for e in read_jsonl(wd, tail=3) if wd.exists() else []:
+        if now - (parse_iso(e.get("ts")) or 0) < 3600:
+            L.append(f"  watchdog {ago(parse_iso(e['ts']))} ago: killed {e.get('label')} ({e.get('mb')} MB) — {e.get('reason')}")
     L.append(f"activity: {calls10} logged tool calls in last 10 min, last event {ago(last_evt)} ago")
     return L
 

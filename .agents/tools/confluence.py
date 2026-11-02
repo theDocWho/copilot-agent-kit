@@ -156,6 +156,8 @@ def main():
     slice_s = a.time_slice or cfg.get("time_slice_s", 240)
     progress = STATE / "progress" / f"crawl-{a.job}.jsonl"
     att_dir = CACHE / a.job / "attachments"
+    import memprobe
+    memprobe.lower_priority()
     register_worker(os.getpid(), f"confluence:{a.job}")
     start, status = time.time(), "time_slice"
     try:

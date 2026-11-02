@@ -1,11 +1,21 @@
 {
   "_comment": "Resource + request budgets. Edit freely. All tools read this file at startup.",
   "memory": {
-    "total_mb": 4096,
-    "vscode_soft_limit_mb": 2560,
-    "worker_mb": 1024,
-    "pause_at_pct": 90,
-    "resume_at_pct": 75,
+    "_note": "Goal: never let a task spiral and lock the computer. The kit does NOT cap VS Code's own size (10 GB+ is normal with language servers). It watches whole-machine memory pressure and the GROWTH of VS Code since the task's low point, hard-caps every process the kit starts, runs them at low priority, and a watchdog kills kit workers if the machine gets close to running out.",
+    "pause_below_available_pct": 10,
+    "pause_below_available_mb": 1500,
+    "warn_below_available_pct": 20,
+    "commit_pause_pct": 92,
+    "commit_warn_pct": 85,
+    "vscode_growth_warn_mb": 3072,
+    "vscode_absolute_warn_mb": null,
+    "worker_mb": 2048,
+    "workers_total_mb": 4096,
+    "watchdog": true,
+    "watchdog_kill_below_available_mb": 800,
+    "watchdog_interval_s": 3,
+    "static_max_parallel_subagents": 2,
+    "static_crawl_concurrency": 2,
     "vscode_process_names": [
       "Code.exe",
       "code",
@@ -18,10 +28,7 @@
       "Code - Insiders.exe",
       "code-insiders",
       "electron"
-    ],
-    "_note": "total_mb = VS Code (all processes) + every worker started by the agents. Workers get worker_mb; when the total crosses pause_at_pct the crawler pauses and next-wave stops dispatching until it drops below resume_at_pct. If memory cannot be measured at all (no psutil, ctypes blocked), the static_* limits apply instead.",
-    "static_max_parallel_subagents": 2,
-    "static_crawl_concurrency": 2
+    ]
   },
   "crawl": {
     "start_concurrency": 4,

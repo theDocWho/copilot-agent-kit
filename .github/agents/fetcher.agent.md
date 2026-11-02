@@ -1,7 +1,7 @@
 ---
 name: Fetcher
 description: Cheap Haiku worker for fetching, memory-capped crawling, reading many files, extracting and summarizing into digest files. Used as a subagent for ledger units.
-model: ['Claude Haiku 4.5 (copilot)', 'Claude Haiku 4.5']
+model: ['Claude Haiku 5.5 (copilot)', 'Claude Haiku 5.5']
 tools: ['read', 'search', 'edit', 'execute']
 user-invocable: false
 ---

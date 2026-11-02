@@ -81,10 +81,11 @@ def main():
     cap = a.mb or budget()["memory"].get("worker_mb", 1024)
 
     kw = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
-    if os.name == "nt":
-        kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if os.name == "nt":  # below-normal priority keeps the desktop responsive
+        kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0) | 0x00004000
     else:
         kw["start_new_session"] = True
+        kw["preexec_fn"] = lambda: os.nice(10)
     proc = subprocess.Popen(a.shell if a.shell else cmd, shell=bool(a.shell), **kw)
 
     job, mode = None, "poll"

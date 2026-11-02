@@ -74,8 +74,13 @@ else:
     check(False, ".vscode/settings.json present", "copy the kit's .vscode/settings.json (merge with yours)")
 
 m = b.get("memory", {})
-check(m.get("vscode_soft_limit_mb", 0) + m.get("worker_mb", 0) <= m.get("total_mb", 0),
-      f"memory split: VS Code {m.get('vscode_soft_limit_mb')} + workers {m.get('worker_mb')} <= total {m.get('total_mb')} MB")
+sm = memprobe.system_memory()
+if sm:
+    print(f"  OK   machine memory readable: {sm['available_mb']} of {sm['total_mb']} MB free"
+          + (f", commit charge {sm['commit_pct']}%" if sm.get("commit_pct") is not None else "")
+          + f" (pause below {m.get('pause_below_available_mb')} MB / {m.get('pause_below_available_pct')}%)")
+else:
+    warn("machine memory not readable -> static limits; the watchdog cannot protect this machine")
 import os  # noqa: E402
 conf = [v for v in ("CONFLUENCE_URL", "CONFLUENCE_TOKEN") if not os.environ.get(v)]
 print("  INFO Confluence credentials: " + ("set" if not conf else f"missing {', '.join(conf)} (only needed for confluence.py)")

@@ -277,3 +277,83 @@ class WinJob:
         if self.h:
             self.k32.CloseHandle(self.h)
             self.h = None
+
+
+# ------------------------------------------------------------------ whole-machine memory
+def system_memory():
+    """{'total_mb', 'available_mb', 'available_pct', 'commit_pct'} or None.
+    available = RAM the OS can hand out without swapping. commit_pct (Windows) = how close
+    the machine is to its commit limit (RAM + page file); at 100% allocations fail and the
+    desktop stalls, so it is the best 'about to lock up' signal there.
+    Env KIT_SIM_AVAILABLE_MB overrides available memory (tests only)."""
+    res = None
+    forced = os.environ.get("KIT_MEM_BACKEND")
+    try:
+        if forced == "none":
+            return None
+        if forced in (None, "psutil") and sys.platform != "win32":
+            try:
+                import psutil  # type: ignore
+                vm = psutil.virtual_memory()
+                res = {"total_mb": vm.total / 1_048_576, "available_mb": vm.available / 1_048_576, "commit_pct": None}
+            except ImportError:
+                pass
+        if res is None and sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes as wt
+
+            class MS(ctypes.Structure):
+                _fields_ = [("dwLength", wt.DWORD), ("dwMemoryLoad", wt.DWORD), ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong), ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong), ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong), ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            m = MS()
+            m.dwLength = ctypes.sizeof(MS)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+                res = {"total_mb": m.ullTotalPhys / 1_048_576, "available_mb": m.ullAvailPhys / 1_048_576,
+                       "commit_pct": round(100 * (1 - m.ullAvailPageFile / m.ullTotalPageFile), 1) if m.ullTotalPageFile else None}
+        if res is None and sys.platform == "win32" and forced in (None, "psutil"):
+            try:
+                import psutil  # type: ignore
+                vm = psutil.virtual_memory()
+                res = {"total_mb": vm.total / 1_048_576, "available_mb": vm.available / 1_048_576, "commit_pct": None}
+            except ImportError:
+                pass
+        if res is None and os.path.exists("/proc/meminfo"):
+            info = {}
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    k, v = line.split(":", 1)
+                    info[k] = int(v.split()[0]) / 1024
+            res = {"total_mb": info["MemTotal"], "available_mb": info.get("MemAvailable", info.get("MemFree", 0)),
+                   "commit_pct": None}
+        if res is None and sys.platform == "darwin":
+            total = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout) / 1_048_576
+            vm = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
+            page = int(re.search(r"page size of (\d+)", vm).group(1))
+            pages = {k: int(v) for k, v in re.findall(r"Pages (free|inactive|speculative|purgeable):\s+(\d+)", vm)}
+            res = {"total_mb": total, "available_mb": sum(pages.values()) * page / 1_048_576, "commit_pct": None}
+    except Exception:
+        res = None
+    if res is None:
+        return None
+    sim = os.environ.get("KIT_SIM_AVAILABLE_MB")
+    if sim:
+        res["available_mb"] = float(sim)
+    res["available_pct"] = round(100 * res["available_mb"] / res["total_mb"], 1) if res["total_mb"] else None
+    res["total_mb"], res["available_mb"] = round(res["total_mb"]), round(res["available_mb"])
+    return res
+
+
+def lower_priority() -> None:
+    """Run this process (and the children it starts) below normal priority, so a heavy kit
+    job never makes the desktop, VS Code or the mouse unresponsive."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            k32.SetPriorityClass(k32.GetCurrentProcess(), 0x00004000)  # BELOW_NORMAL_PRIORITY_CLASS
+        else:
+            os.nice(10)
+    except Exception:
+        pass

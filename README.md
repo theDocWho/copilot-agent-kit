@@ -1,6 +1,6 @@
 # Copilot Agent Kit: cost-routed, memory-bounded agents for VS Code
 
-Give it any task. **Opus plans and reviews, Sonnet implements, Haiku fetches, crawls and summarizes.** The work runs in small waves tracked in a ledger. All the questions come to you in one batch, together with the expected cost. The kit stays inside a memory budget you set (4 GB by default) and never runs long enough in one turn to hit the "Continue?" prompt. When the task is done you get **expected vs. actual cost**.
+Give it any task. **Opus plans and reviews, Sonnet implements, Haiku fetches, crawls and summarizes.** The work runs in small waves tracked in a ledger. All the questions come to you in one batch, together with the expected cost. It watches the machine's memory and stops its own work long before the computer could lock up, and it never runs long enough in one turn to hit the "Continue?" prompt. When the task is done you get **expected vs. actual cost**.
 
 | Agent | Model | Job | API price in/out per 1M tokens* |
 |---|---|---|---|
@@ -8,8 +8,8 @@ Give it any task. **Opus plans and reviews, Sonnet implements, Haiku fetches, cr
 | Planner (subagent) | Claude Opus 5.5 | Splits the task into units sized to the budget, with estimates and questions | $4 / $20 |
 | Reviewer (subagent) | Claude Opus 5.5 | Reviews diffs against the acceptance criteria and schedules fix units | $4 / $20 |
 | Implementer (subagent) | Claude Sonnet 5.5 | Writes the code and runs tests under a memory cap | $2 / $10 |
-| Fetcher (subagent) | Claude Haiku 4.5 | Fetches pages, runs time-sliced crawls, and turns pages into digests (map → reduce) | $1 / $5 |
-| **Monitor** (you talk to this one) | Claude Haiku 4.5 | Read-only status, cost and memory reports | $1 / $5 |
+| Fetcher (subagent) | Claude Haiku 5.5 | Fetches pages, runs time-sliced crawls, and turns pages into digests (map → reduce) | $0.10 / $0.50 (≤100k-token requests) |
+| **Monitor** (you talk to this one) | Claude Haiku 5.5 | Read-only status, cost and memory reports | $0.10 / $0.50 |
 
 \*Since 1 June 2026 Copilot bills AI Credits (1 credit = $0.01) at each model's API rate. The prices live in `.agents/config/pricing.json`. Check them against GitHub's *Models and pricing* page.
 
@@ -20,7 +20,7 @@ Give it any task. **Opus plans and reviews, Sonnet implements, Haiku fetches, cr
 1. Copy `.github/`, `.agents/` and `.vscode/tasks.json` into the root of your workspace. **Merge** `.vscode/settings.json` into your existing settings rather than overwriting them.
 2. Optional: `pip install psutil pypdf`. Neither is required. Memory is measured with built-in fallbacks if psutil can't be installed (see *Locked-down environments*), and pypdf is only needed for PDF text. Playwright is optional and only used by `--render` for JavaScript-heavy sites.
 3. Run **Terminal → Run Task → "Agents: doctor (check setup)"**. Every line should be OK.
-4. Open the model picker and check the model names. The agents pin `Claude Opus 5.5`, `Claude Sonnet 5.5` and `Claude Haiku 4.5`. If your org shows different labels, edit the `model:` line in each `.github/agents/*.agent.md`.
+4. Open the model picker and check the model names. The agents pin `Claude Opus 5.5`, `Claude Sonnet 5.5` and `Claude Haiku 5.5`. If your org shows different labels, edit the `model:` line in each `.github/agents/*.agent.md`.
 5. Keep the chat's model picker on **Claude Opus 5.5** when you use the Orchestrator, and run **`/kit-check`** once. It starts each subagent with a tiny prompt and tells you if a model name or cost tier is wrong.
 6. Permissions: either keep the default level (the kit's scripts are auto-approved by `.vscode/settings.json`, and anything else asks you), or choose **Allow all**. **Don't use Autopilot**: Autopilot answers blocking questions by itself, and this kit is built to bring every question to you.
 
@@ -39,19 +39,25 @@ Give it any task. **Opus plans and reviews, Sonnet implements, Haiku fetches, cr
 
 ## How each requirement is handled
 
-### 1. Stay inside a 4 GB memory budget
-There are three things that make VS Code hang, and each one has a fix:
+### 1. A task can't spiral and lock up the computer
+The kit doesn't try to fit VS Code into a fixed budget. VS Code with language servers and long chats often sits at 10 GB or more, and that's fine as long as it's stable. What locks a machine is the **whole machine** running out of RAM, or on Windows the commit limit (RAM plus page file), while something keeps growing. So the kit protects against that in layers:
 
-* **Huge chat context.** Page text never enters the chat. `crawl.py` writes trimmed markdown to disk and prints one JSON line. Haiku digest units read a batch of at most about 30k tokens and write a digest of about 1,200 words. Only `summary.md` reaches the Orchestrator. The Fetcher has **no web-fetch tool** at all: even a single page goes through `crawl.py --max-depth 0` to disk.
-* **Heavy processes.** The crawler keeps its frontier in SQLite, so its memory stays flat whether there are 1k or 100k URLs. Its concurrency adapts: it halves above 80% of `worker_mb` and grows below 50%. Builds and tests run under `memguard.py`. On Windows it puts the command in a Job Object, so Windows itself enforces the cap on the whole process tree. Elsewhere it polls the tree and kills it. Either way it returns exit code 137 with the reason. The agent then retries with a smaller batch.
-* **Global budget.** `total_mb` (4096) covers *all VS Code processes plus every worker the kit starts*. When the total passes `pause_at_pct` (90%):
-  - the crawler pauses, then exits with `memory_pause`. The crawl can be resumed later.
-  - `next-wave` returns `MEMORY_PAUSE`, and the Orchestrator checkpoints and tells you to resume in a new chat. A new chat frees the renderer memory used by the old one.
+* **It watches machine pressure, not a total.** Every wave, `next-wave` checks free RAM and the Windows commit charge.
+  - **PAUSE** when free RAM is under 10% or 1.5 GB, or commit charge is at 92% or more. No new subagents start, crawls pause, and the Orchestrator checkpoints and tells you what's wrong.
+  - **WARN** under 20% free or at 85% commit.
+  - Thresholds are in `budget.json`, under `memory.pause_below_*` and `commit_*`.
+* **It watches VS Code's growth, not its size.** The kit remembers VS Code's lowest point during the task. If VS Code grows more than 3 GB above that (`vscode_growth_warn_mb`), you're told to continue in a **new chat**. Long chat sessions are the usual cause, and a new chat releases that memory. The ledger keeps all state, so nothing is lost.
+* **Every process the kit starts is capped and polite.**
+  - `memguard.py` caps each command at `worker_mb` (2 GB). On Windows that's a Job Object, so Windows itself refuses allocations past the cap.
+  - The crawler and converter adapt their concurrency and keep data on disk.
+  - Everything the kit starts runs at **below-normal priority**, so the mouse, the desktop and VS Code stay responsive even while a job is busy.
+* **There's an emergency brake that doesn't depend on the agent.** `watchdog.py` starts automatically with the first turn: a tiny low-priority background process that checks every 3 s.
+  - If free RAM falls under 800 MB, it kills the kit's own workers, largest first, until the pressure is gone, and sets a stop flag that pauses the task until RAM recovers.
+  - It also kills any single worker that grows past 1.5 × `worker_mb`.
+  - It never touches VS Code or anything the kit didn't start.
+* **Chat context stays small.** Page text never enters the chat. `crawl.py` writes trimmed markdown to disk and prints one JSON line. Haiku digest units read batches of about 30k tokens. Only `summary.md` reaches the Orchestrator. The Fetcher has **no web-fetch tool** at all. Subagents render inline (`useRichRendering: false`), and `.agents/cache` is excluded from the file watcher, search and the explorer.
 
-  If VS Code alone goes over `vscode_soft_limit_mb` (2560), you get "open a new chat" before anything breaks.
-* Other settings help too: subagents render inline (`useRichRendering: false`), and `.agents/cache` is excluded from the file watcher, search and the explorer. Thousands of crawled files would otherwise bloat VS Code itself.
-
-> Honest limit: no extension can hard-cap the memory of VS Code's own Electron processes. The kit *measures* VS Code, caps everything it launches, stops adding load when the total is high, and moves work to a fresh chat to free memory.
+> Honest limit: no extension can cap VS Code's own Electron processes. To see what makes up your 10 GB, use **Help → Open Process Explorer**. Language servers are often the biggest part and have their own caps, for example `java.jdt.ls.vmargs` (`-Xmx2G`) or `typescript.tsserver.maxTsServerMemory`.
 
 ### 2. No "Continue?" prompts and no endless sessions
 * `chat.agent.maxRequests` = 150. The ledger gives each chat turn a **budget of 60% of that** (90 tool calls), and the budget counts the Orchestrator plus every subagent it starts. `next-wave` only schedules units whose estimates fit what's left of the budget. When the budget is used up it returns `END_TURN`, and the Orchestrator checkpoints and stops cleanly. It never gets cut off in the middle of a unit.
@@ -94,7 +100,7 @@ Same work with every agent on Opus ≈ $4.06 → routing saved ≈ $1.81 (45%)
 |---|---|
 | **Hooks disabled by policy** | Nothing depends on them. `memguard.py` is the safety check (every non-kit command goes through it), `ledger.py next-wave` is the memory gate, and the kit logs its own tool calls to `.agents/state/calls.jsonl` for status and cost. `.github/hooks/` only adds extra telemetry where hooks are allowed. |
 | **psutil can't be installed** | `memprobe.py` measures memory with what is already there. On Windows it uses ctypes (process snapshot plus working-set size, no admin rights, because VS Code runs as you) and falls back to `tasklist`. On Linux it reads `/proc`, and on macOS it runs `ps`. memguard's hard cap on Windows uses a **Job Object**, which needs no extra package. |
-| **Memory can't be read at all** | State `UNMEASURED`: the kit switches to static limits (`memory.static_max_parallel_subagents` = 2, crawl concurrency 2), memguard keeps its timeout, and turn-start tells the Orchestrator to prefer a new chat per phase. `doctor` shows which method is in use and why the others failed. |
+| **Memory can't be read at all** | State `UNMEASURED`: the kit switches to static limits (`memory.static_max_parallel_subagents` = 2, crawl concurrency 2), memguard keeps its timeout and low priority, and turn-start tells the Orchestrator to prefer a new chat per phase. `doctor` shows which method is in use and why the others failed. Free RAM is read separately (`GlobalMemoryStatusEx` on Windows), so the pressure checks and the watchdog usually still work when per-process numbers don't. |
 | **A subagent's model can't cost more than the calling chat's** | Planner and Reviewer have **no pinned model**, so they inherit the chat's model and can never exceed it. Implementer (Sonnet) and Fetcher (Haiku) are cheaper than Opus. Keep the chat on Opus when you run the Orchestrator. **Economy mode:** run the chat on Sonnet and set `pricing.json` `chat_model` to `sonnet`; Planner and Reviewer then run on Sonnet. `/kit-check` catches tier and model-name problems before a real task. |
 | **Subagents can't ask questions** | By design, they never need to. The Planner puts every decision into the plan's questions, which you get in one form. A worker that hits a new decision finishes `blocked --question`, and the Orchestrator batches those into one form per wave. |
 | **Subagents can't start subagents** | By design, only the Orchestrator dispatches. A worker that finds more work adds **ledger units** (`ledger.py add`, `batch.py --add-units`), and the next wave picks them up. Nested subagents are never used. |
@@ -187,9 +193,11 @@ memguard.py (every non-kit command): safety check + memory cap · next-wave: mem
 
 | Key | Default | Meaning |
 |---|---|---|
-| `memory.total_mb` | 4096 | VS Code plus all workers |
-| `memory.vscode_soft_limit_mb` / `worker_mb` | 2560 / 1024 | Split of the total |
-| `memory.pause_at_pct` / `resume_at_pct` | 90 / 75 | Backpressure thresholds |
+| `memory.pause_below_available_pct` / `_mb` | 10 / 1500 | Pause the task when the machine's free RAM is this low |
+| `memory.commit_pause_pct` / `commit_warn_pct` | 92 / 85 | Windows commit charge (RAM + page file) thresholds |
+| `memory.vscode_growth_warn_mb` | 3072 | VS Code growth during a task before "open a new chat" |
+| `memory.worker_mb` | 2048 | Hard cap per process the kit starts |
+| `memory.watchdog` / `watchdog_kill_below_available_mb` | true / 800 | Emergency brake: kill the kit's workers below this much free RAM |
 | `crawl.time_slice_s` | 240 | Longest a single crawl call runs |
 | `crawl.start_concurrency` / `max_concurrency` | 4 / 8 | Adaptive range |
 | `crawl.per_host_delay_s` | 0.5 | Politeness delay between requests to one host |
@@ -208,7 +216,7 @@ memguard.py (every non-kit command): safety check + memory cap · next-wave: mem
 .github/copilot-instructions.md   shared rules (files not chat, budgets, questions)
 .agents/config/               budget.json, pricing.json
 .agents/playbooks/            task playbooks (threat-model.md + example plan)
-.agents/tools/                ledger, skills, crawl, confluence, convert, batch, memguard, memprobe, status, cost, hooks, doctor (stdlib only; psutil optional)
+.agents/tools/                ledger, skills, crawl, confluence, convert, batch, memguard, memprobe, watchdog, status, cost, hooks, doctor (stdlib only; psutil optional)
 .agents/state/  (runtime)     active task, ledgers, unit briefs, notes, reviews, call log, progress
 .agents/cache/  (runtime)     crawled pages, batches, digests, summary.md
 ```

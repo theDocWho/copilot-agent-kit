@@ -79,8 +79,7 @@ def main():
             snap["_t"] = time.time()
             save_json(cache, snap)
         if snap.get("state") == "PAUSE":
-            deny(f"Memory budget exceeded ({snap.get('used_pct')}% of {snap.get('total_budget_mb')}MB; VS Code "
-                 f"{snap.get('vscode_mb')}MB). Do not start subagents. Checkpoint with ledger.py, end the turn and ask "
+            deny(f"Machine memory is low ({'; '.join(snap.get('reasons', []))}). Do not start subagents. Checkpoint with ledger.py, end the turn and ask "
                  "the user to open a NEW chat and run /next-wave.")
             return
 

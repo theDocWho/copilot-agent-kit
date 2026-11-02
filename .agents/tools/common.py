@@ -210,28 +210,80 @@ def unregister_worker(pid: int) -> None:
         save_json(STATE / "workers.json", reg)
 
 
+def vscode_baseline(current: float | None) -> float | None:
+    """Low-water mark of VS Code memory for the active task. Growth above it is what the
+    kit watches (a big but stable VS Code is fine; one that keeps growing is not).
+    Opening a new chat lowers VS Code memory, which moves the baseline down."""
+    if current is None:
+        return None
+    p = STATE / "mem_baseline.json"
+    data = load_json(p, {}) or {}
+    task = (load_json(STATE / "active.json", {}) or {}).get("task_id")
+    if data.get("task") != task or data.get("vscode_mb") is None or current < data["vscode_mb"]:
+        data = {"task": task, "vscode_mb": round(current), "since": now_iso()}
+        try:
+            save_json(p, data)
+        except OSError:
+            pass
+    return data["vscode_mb"]
+
+
 def memory_snapshot() -> dict:
-    """state: OK / WARN / PAUSE, or UNMEASURED when no backend can read memory
-    (then every tool falls back to the static limits in budget.json memory.static_*)."""
+    """Machine-level memory pressure, not a fixed budget.
+
+    PAUSE  available RAM below pause_below_available_pct/_mb, or commit charge >= commit_pause_pct
+    WARN   available below warn_below_available_pct, commit >= commit_warn_pct,
+           or VS Code grew more than vscode_growth_warn_mb since the task's low point
+    OK     otherwise.   UNMEASURED: nothing readable -> static limits.
+    A watchdog-written stop flag (state/memory_stop.json) also forces PAUSE until RAM recovers."""
     m = budget().get("memory", {})
-    total_budget = m.get("total_mb", 4096)
+    sysm = memprobe.system_memory()
     vs = vscode_mb(m.get("vscode_process_names"))
     wk = workers_mb()
-    measurable = vs is not None
-    used = (vs or 0) + (wk or 0)
-    pct = round(100 * used / total_budget, 1) if measurable else None
-    if pct is None:
+    base = vscode_baseline(vs)
+    growth = round(vs - base) if (vs is not None and base is not None) else None
+    state, reasons = "OK", []
+    if sysm is None and vs is None:
         state = "UNMEASURED"
-    else:
-        state = "PAUSE" if pct >= m.get("pause_at_pct", 90) else ("WARN" if pct >= m.get("resume_at_pct", 75) else "OK")
+    if sysm:
+        av_pct, av_mb, commit = sysm.get("available_pct"), sysm.get("available_mb"), sysm.get("commit_pct")
+        if (av_pct is not None and av_pct < m.get("pause_below_available_pct", 10)) or av_mb < m.get("pause_below_available_mb", 1500):
+            state = "PAUSE"; reasons.append(f"only {av_mb} MB ({av_pct}%) RAM available")
+        if commit is not None and commit >= m.get("commit_pause_pct", 92):
+            state = "PAUSE"; reasons.append(f"commit charge {commit}%")
+        if state == "OK":
+            if av_pct is not None and av_pct < m.get("warn_below_available_pct", 20):
+                state = "WARN"; reasons.append(f"RAM available {av_pct}%")
+            if commit is not None and commit >= m.get("commit_warn_pct", 85):
+                state = "WARN"; reasons.append(f"commit charge {commit}%")
+    stop = load_json(STATE / "memory_stop.json", None)
+    if stop:
+        recovered = sysm and sysm.get("available_pct", 0) >= m.get("warn_below_available_pct", 20)
+        if recovered:
+            (STATE / "memory_stop.json").unlink(missing_ok=True)
+        else:
+            state = "PAUSE"; reasons.append("watchdog stopped kit workers: " + stop.get("reason", ""))
+    new_chat = bool(growth is not None and growth > m.get("vscode_growth_warn_mb", 3072)) or \
+        bool(m.get("vscode_absolute_warn_mb") and vs and vs > m["vscode_absolute_warn_mb"])
+    if new_chat and state == "OK":
+        state = "WARN"
+    if new_chat:
+        reasons.append(f"VS Code grew {growth} MB this task")
     return {
         "backend": memprobe.backend(),
-        "vscode_mb": round(vs, 0) if vs is not None else None,
-        "workers_mb": round(wk, 0) if wk is not None else None,
-        "total_budget_mb": total_budget,
-        "used_pct": pct,
         "state": state,
-        "vscode_over_soft_limit": bool(vs and vs > m.get("vscode_soft_limit_mb", 2560)),
+        "reasons": reasons,
+        "ram_total_mb": sysm and sysm["total_mb"],
+        "ram_available_mb": sysm and sysm["available_mb"],
+        "ram_available_pct": sysm and sysm["available_pct"],
+        "commit_pct": sysm and sysm.get("commit_pct"),
+        "vscode_mb": round(vs) if vs is not None else None,
+        "vscode_baseline_mb": base,
+        "vscode_growth_mb": growth,
+        "workers_mb": round(wk) if wk is not None else None,
+        "used_pct": round(100 - sysm["available_pct"], 1) if sysm and sysm.get("available_pct") is not None else None,
+        "new_chat_recommended": new_chat,
+        "vscode_over_soft_limit": new_chat,  # backwards-compatible name
     }
 
 
@@ -285,6 +337,9 @@ def unit_cost(model_key: str, calls: float, work_tokens: float, out_tokens: floa
     a = pr.get("assumptions", {})
     m = pr["models"][model_key]
     base = a.get("base_context_tokens", 12000)
+    lc = m.get("long_context")
+    if lc and base + work_tokens > lc.get("above_tokens", 10 ** 12):  # peak request size crosses the tier
+        m = {**m, **lc}
     hit = a.get("cache_hit_ratio", 0.75)
     overhead = a.get("tool_call_overhead_out_tokens", 120)
     calls = max(1.0, float(calls))

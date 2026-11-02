@@ -262,12 +262,17 @@ def cmd_turn_start(a):
     t = mutate(fn)
     mem = memory_snapshot()
     print(f"TURN {t['n']} budget={t['budget']} tool calls (orchestrator + subagents). memory={mem['state']}"
-          f" ({mem['backend']}) vscode={mem['vscode_mb']}MB workers={mem['workers_mb']}MB used={mem['used_pct']}%")
+          f" ({mem['backend']}) RAM free={mem['ram_available_mb']}MB ({mem['ram_available_pct']}%)"
+          f" vscode={mem['vscode_mb']}MB (+{mem['vscode_growth_mb']} this task) workers={mem['workers_mb']}MB"
+          + (f" | {'; '.join(mem['reasons'])}" if mem["reasons"] else ""))
+    import subprocess as _sp
+    w = _sp.run([sys.executable, str(Path(__file__).with_name("watchdog.py")), "--ensure"], capture_output=True, text=True)
+    print((w.stdout or w.stderr).strip()[:120])
     if mem["state"] == "UNMEASURED":
         print(f"MEMORY_UNMEASURED: no way to read process memory here; using static limits "
               f"({static_limits()['parallel']} subagents per wave). Prefer new chats per phase.")
-    if mem["vscode_over_soft_limit"]:
-        print("NEW_SESSION_RECOMMENDED: VS Code is over its soft memory limit. Finish this wave, then tell the user to open a new chat and run /next-wave.")
+    if mem["new_chat_recommended"]:
+        print("NEW_SESSION_RECOMMENDED: VS Code memory has grown a lot during this task. Finish this wave, then tell the user to open a new chat and run /next-wave.")
 
 
 def cmd_next_wave(a):
@@ -326,7 +331,8 @@ def cmd_next_wave(a):
     elif status == "BLOCKED_ON_QUESTIONS":
         print("Run `ledger.py questions`, ask the user ALL of them in one askQuestions call, record with `ledger.py answer`.")
     elif status == "MEMORY_PAUSE":
-        print(f"Memory {mem['used_pct']}% of budget. Do not start subagents. End the turn; ask the user to open a new chat and run /next-wave.")
+        print(f"Machine memory is low ({'; '.join(mem['reasons'])}). Do not start subagents. End the turn; ask the user to "
+              "close heavy apps or open a new chat, then run /next-wave.")
     elif status == "END_TURN":
         print("Turn budget used. Write a 5-line checkpoint and end your turn (the user or /next-wave resumes). Do NOT keep working.")
     elif status in ("NEEDS_ATTENTION", "WAIT_RUNNING"):

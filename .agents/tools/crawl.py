@@ -18,8 +18,9 @@ Design
 - Each run is a time slice (budget.json crawl.time_slice_s) so one agent tool call never
   hangs; re-running the same command continues where it stopped.
 - Concurrency adapts to memory: halves above 80% of worker_mb, grows below 50%.
-- Global backpressure: if VS Code + workers exceed pause_at_pct of total_mb, the crawler
-  pauses, then exits with status=memory_pause (resumable) instead of starving VS Code.
+- Machine-level backpressure: if free RAM gets low (budget.json memory.pause_below_*), the
+  crawler pauses, then exits with status=memory_pause (resumable) instead of starving the PC.
+- Runs at below-normal priority so the desktop stays responsive.
 - Per-host politeness delay, robots.txt respected (disable with --no-robots).
 """
 from __future__ import annotations
@@ -345,13 +346,11 @@ class Crawler:
         """Return True if we must stop (memory_pause)."""
         if snap.get("state") != "PAUSE":
             return False
-        resume = budget()["memory"].get("resume_at_pct", 75)
         self.conc = 1
         gc.collect()
-        for _ in range(12):  # wait up to ~60 s for VS Code / other workers to drop
+        for _ in range(12):  # wait up to ~60 s for memory to recover
             time.sleep(5)
-            s = memory_snapshot()
-            if s["used_pct"] is not None and s["used_pct"] < resume:
+            if memory_snapshot()["state"] != "PAUSE":
                 return False
         return True
 
@@ -437,6 +436,8 @@ def main():
     p.add_argument("--cookie-env", help="NAME of env var holding a Cookie header value (SSO session)")
     a = p.parse_args()
     cfg = budget().get("crawl", {})
+    import memprobe
+    memprobe.lower_priority()
     register_worker(os.getpid(), f"crawl:{a.job}")
     try:
         c = Crawler(a, cfg)
