@@ -6,6 +6,12 @@ NOTHING large is printed, so the chat context that runs it stays small.
   crawl.py --job docs                    # resume (same job name) - run again until status=complete
   crawl.py --job list --seeds-file urls.txt --max-depth 0     # fetch exactly a URL list
   crawl.py --job spa --seeds https://app.example.com --render  # JS pages via Playwright (optional)
+  crawl.py --job wiki --seeds https://intranet/docs --auth-env INTRANET_TOKEN   # authenticated internal site
+  crawl.py --job sso --seeds https://portal/docs --cookie-env PORTAL_COOKIE     # reuse a browser session cookie
+
+Secrets: --auth-env / --cookie-env take the NAME of an environment variable. The value is
+read at run time, sent only to the seed domains, and never written to disk or printed.
+For Confluence use confluence.py (REST API) instead of crawling its HTML.
 
 Design
 - Frontier and results live in SQLite on disk -> memory is flat for 10 or 100k URLs.
@@ -38,13 +44,29 @@ from pathlib import Path
 from urllib.parse import urldefrag, urljoin, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (CACHE, STATE, append_jsonl, budget, memory_snapshot, now_iso,  # noqa: E402
-                    register_worker, rel, self_tree_mb, unregister_worker)
+from common import (CACHE, STATE, append_jsonl, auth_header_from_env, budget, memory_snapshot,  # noqa: E402
+                    now_iso, register_worker, rel, self_tree_mb, unregister_worker)
 
 SKIP_TAGS = {"script", "style", "noscript", "svg", "canvas", "template", "iframe", "head"}
 BLOCK_TAGS = {"p", "div", "section", "article", "li", "tr", "br", "h1", "h2", "h3", "h4", "h5", "h6",
               "pre", "blockquote", "table", "ul", "ol", "header", "footer", "nav", "main", "dd", "dt"}
 BINARY_EXT = re.compile(r"\.(png|jpe?g|gif|webp|svg|ico|pdf|zip|gz|tgz|rar|7z|exe|msi|dmg|mp[34]|avi|mov|woff2?|ttf|eot|css|js|xml|rss)(\?|$)", re.I)
+
+
+class SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Drop credentials when a redirect leaves the allowed domains."""
+
+    def __init__(self, domains):
+        super().__init__()
+        self.domains = domains
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urlparse(newurl).netloc.lower() not in self.domains:
+            for h in ("Authorization", "Cookie"):
+                new.headers.pop(h, None)
+                new.unredirected_hdrs.pop(h, None)
+        return new
 
 
 class TextExtractor(HTMLParser):
@@ -94,6 +116,10 @@ class TextExtractor(HTMLParser):
         if t.strip():
             self._emit(t)
 
+    def unknown_decl(self, data):  # <![CDATA[ ... ]]> e.g. Confluence code macros
+        if data.startswith("CDATA[") and not self._skip:
+            self._emit("\n" + data[6:] + "\n")
+
     def _emit(self, s):
         if self.size < self.max_chars:
             self.parts.append(s)
@@ -126,6 +152,11 @@ class Crawler:
         self.host_lock = threading.Lock()
         self.host_next: dict[str, float] = {}
         self.robots: dict[str, urllib.robotparser.RobotFileParser | None] = {}
+        self.auth = auth_header_from_env(self.opts.get("auth_env"))
+        self.cookie = os.environ.get(self.opts["cookie_env"]) if self.opts.get("cookie_env") else None
+        if self.opts.get("cookie_env") and not self.cookie:
+            sys.exit(f"ERROR: environment variable {self.opts['cookie_env']} is empty or not set.")
+        self.opener = urllib.request.build_opener(SafeRedirect(self.opts["domains"]))
         self.conc = cfg["start_concurrency"]
         self.worker_mb = budget()["memory"].get("worker_mb", 1024)
         socket.setdefaulttimeout(cfg["timeout_s"])
@@ -144,6 +175,8 @@ class Crawler:
             "robots": (not a.no_robots) if (a.no_robots or not saved) else saved.get("robots", True),
             "render": a.render or saved.get("render", False),
             "domains": saved.get("domains", []),
+            "auth_env": a.auth_env or saved.get("auth_env"),
+            "cookie_env": a.cookie_env or saved.get("cookie_env"),
         }
         seeds = list(a.seeds or [])
         if a.seeds_file:
@@ -204,9 +237,14 @@ class Crawler:
                 res.update(status="skipped", err="robots.txt")
                 return res
             self.polite_wait(url)
-            req = urllib.request.Request(url, headers={"User-Agent": self.cfg["user_agent"],
-                                                       "Accept": "text/html,text/plain;q=0.9,*/*;q=0.5"})
-            with urllib.request.urlopen(req, timeout=self.cfg["timeout_s"]) as r:
+            headers = {"User-Agent": self.cfg["user_agent"], "Accept": "text/html,text/plain;q=0.9,*/*;q=0.5"}
+            if urlparse(url).netloc.lower() in self.opts["domains"]:  # never leak credentials off-site
+                if self.auth:
+                    headers["Authorization"] = self.auth
+                if self.cookie:
+                    headers["Cookie"] = self.cookie
+            req = urllib.request.Request(url, headers=headers)
+            with self.opener.open(req, timeout=self.cfg["timeout_s"]) as r:
                 res["http"] = r.status
                 ctype = r.headers.get("Content-Type", "")
                 if not any(t in ctype for t in ("html", "text/plain", "json", "markdown")):
@@ -393,6 +431,8 @@ def main():
     p.add_argument("--no-robots", action="store_true")
     p.add_argument("--render", action="store_true", help="render JS with Playwright (sequential, more memory)")
     p.add_argument("--time-slice", type=int, help="seconds for this run (default budget.json)")
+    p.add_argument("--auth-env", help="NAME of env var holding a token ('Bearer x', 'user:token' or raw token)")
+    p.add_argument("--cookie-env", help="NAME of env var holding a Cookie header value (SSO session)")
     a = p.parse_args()
     cfg = budget().get("crawl", {})
     register_worker(os.getpid(), f"crawl:{a.job}")

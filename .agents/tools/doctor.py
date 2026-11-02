@@ -57,6 +57,10 @@ else:
 m = b.get("memory", {})
 check(m.get("vscode_soft_limit_mb", 0) + m.get("worker_mb", 0) <= m.get("total_mb", 0),
       f"memory split: VS Code {m.get('vscode_soft_limit_mb')} + workers {m.get('worker_mb')} <= total {m.get('total_mb')} MB")
+import os  # noqa: E402
+conf = [v for v in ("CONFLUENCE_URL", "CONFLUENCE_TOKEN") if not os.environ.get(v)]
+print("  INFO Confluence credentials: " + ("set" if not conf else f"missing {', '.join(conf)} (only needed for confluence.py)")
+      + ("; Cloud mode (CONFLUENCE_EMAIL set)" if os.environ.get("CONFLUENCE_EMAIL") else ""))
 snap = memory_snapshot()
 print(f"  INFO memory now: {json.dumps(snap)}")
 if psutil and snap.get("vscode_mb") == 0:

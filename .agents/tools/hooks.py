@@ -26,6 +26,10 @@ DENY_CMD = [
     (r"\bgit\s+(reset\s+--hard|clean\s+-[a-z]*f)", "discarding local work"),
     (r"(^|[;&|]\s*)\s*(format\s+[a-z]:|mkfs|diskpart|shutdown|reboot)\b", "system-level command"),
     (r"(curl|wget|iwr|Invoke-WebRequest)[^|]*\|\s*(sh|bash|iex|powershell)", "piping a download into a shell"),
+    (r"(echo|printf|Write-(Output|Host)|cat|type)\b.*\$(env:)?\{?\w*(TOKEN|SECRET|PASSWORD|PASSWD|COOKIE|API_?KEY|CREDENTIAL)",
+     "printing a secret into the chat context"),
+    (r"(^|[;&|]\s*)\s*(printenv|env|set|Get-ChildItem\s+env:|gci\s+env:|dir\s+env:)\s*($|[;&|])",
+     "dumping all environment variables (may contain secrets)"),
 ]
 BULK_FETCH_LIMIT = 8          # web/fetch calls allowed per 10 minutes before forcing crawl.py
 BULK_FETCH_WINDOW = 600

@@ -88,6 +88,36 @@ Same work with every agent on Opus ≈ $4.06 → routing saved ≈ $1.81 (45%)
 
 ---
 
+## Internal sources
+
+Everything below writes into the same job store as the web crawler, so `batch.py --job <job> --add-units` turns any source into Haiku digest units the same way. Secrets are always passed as the **name** of an environment variable. Their values are read at run time, sent only to the source's own host (and stripped if a redirect leaves it), and never written to disk, printed, or put in chat.
+
+### Confluence (REST API, Cloud or Data Center)
+Set the credentials in the terminal VS Code runs in (or your OS user environment), not in any file in the repo:
+
+```
+CONFLUENCE_URL    Cloud: https://<site>.atlassian.net/wiki    Data Center: https://confluence.corp[/context]
+CONFLUENCE_TOKEN  Cloud: API token                            Data Center: personal access token
+CONFLUENCE_EMAIL  Cloud only (Basic auth). Leave unset for Data Center (Bearer token).
+```
+
+```
+python .agents/tools/confluence.py --check                                 # test URL + credentials
+python .agents/tools/confluence.py --job kb-sec  --space SEC --label standard
+python .agents/tools/confluence.py --job kb-arch --ancestor 123456 --attachments   # a page tree + its diagrams/docs
+python .agents/tools/confluence.py --job kb-x    --cql 'space = OPS and title ~ "runbook"'
+```
+It uses the CQL search API with `_links.next` paging. Each page becomes markdown with page id, space, breadcrumb, version, modified date and URL in its front matter, so findings can cite the exact page. Confluence code blocks are kept. Long pages are split into parts, not truncated. `--attachments` downloads images and documents attached to the pages. The crawl is time-sliced and resumable like `crawl.py`, and it backs off on HTTP 429. It refuses to run without a filter, so it never dumps a whole site by accident.
+
+### Other internal sites (intranet, SharePoint pages, wikis)
+```
+python .agents/tools/crawl.py --job infra --seeds https://intranet/infra/ --auth-env INTRANET_TOKEN
+python .agents/tools/crawl.py --job portal --seeds https://portal/docs/ --cookie-env PORTAL_COOKIE
+```
+`--auth-env` takes a token (`Bearer x`, `user:token` for Basic, or a raw token, sent as Bearer). `--cookie-env` reuses a browser session cookie for SSO-only sites: copy the `Cookie` request header from your browser's dev tools into the variable.
+
+---
+
 ## Flow
 
 ```
@@ -129,7 +159,7 @@ guard hook (every tool call): blocks destructive commands, bulk fetching, and ne
 .github/hooks/agent-kit.json  guard + telemetry hooks -> .agents/tools/hooks.py
 .github/copilot-instructions.md   shared rules (files not chat, budgets, questions)
 .agents/config/               budget.json, pricing.json
-.agents/tools/                ledger, crawl, batch, memguard, status, cost, hooks, doctor (stdlib + psutil)
+.agents/tools/                ledger, crawl, confluence, batch, memguard, status, cost, hooks, doctor (stdlib + psutil)
 .agents/state/  (runtime)     active task, ledgers, unit briefs, notes, reviews, hook log, progress
 .agents/cache/  (runtime)     crawled pages, batches, digests, summary.md
 ```
@@ -139,4 +169,5 @@ guard hook (every tool call): blocks destructive commands, bulk fetching, and ne
 * **Hooks** need `chat.useHooks` and a trusted workspace. On Windows the hook runs `python`, and on macOS/Linux it runs `python3`. If hooks don't fire, everything else still works, but you lose the guard, the memory gate and the hook-based call counts.
 * **`chat.agent.maxRequests`** may be capped by your org or by an experiment. If so, set `agents.max_requests_setting` to the real value.
 * **Billing mode.** If your org is still on legacy premium requests, set `legacy_premium_requests.enabled` in `pricing.json` and fill in the multipliers. The report will then show premium requests as well.
+* **Confluence**: a 401/403 means the token can't see that content. The guard hook blocks commands that print tokens or dump environment variables, so secrets stay out of chat history.
 * `vscode_process_names`: if `doctor` says it finds no VS Code processes while VS Code is open, add your process names to this list.

@@ -21,6 +21,11 @@ Use `python` (or `python3` if `python` is not found).
 - When the crawl is done, run the `batch.py ... --add-units` command from the brief.
 - Never open the crawled page files during a crawl unit.
 
+## Confluence and other internal sites
+- Confluence: run the `confluence.py` command from the brief (CQL/space/label/ancestor filters). Same loop as crawling: re-run while `status` is `time_slice`, then run the `next` commands it prints (convert attachments, add digest units).
+- If it says CONFLUENCE_URL/TOKEN are missing or returns 401/403: do not try other ways in. Finish with `--status blocked --question "Confluence credentials needed: set CONFLUENCE_URL, CONFLUENCE_TOKEN (and CONFLUENCE_EMAIL for Cloud) in the VS Code terminal environment, then answer 'done'."`
+- Authenticated intranet sites: `crawl.py ... --auth-env <VAR>` or `--cookie-env <VAR>`. Pass only the variable **name**. Never echo, print or write a secret's value.
+
 ## Digest / reduce units
 - Read the batch JSON, then each listed file **once**. Write the digest exactly as the brief specifies: bullet facts with the source URL, numbers and names, short quotes under 15 words. Skip irrelevant pages.
 - Reduce units: follow the brief (it runs `batch.py --plan-only` first and decides between writing `summary.md` or scheduling another round).

@@ -285,3 +285,67 @@ def model_for_agent(agent: str, pr: dict | None = None) -> str:
 
 def fmt_usd(x: float) -> str:
     return f"${x:,.2f}" if x >= 0.1 else f"${x:,.3f}"
+
+
+# ---------------------------------------------------------------- shared job store
+def open_job_db(job: str):
+    """SQLite store shared by crawl.py, confluence.py and convert.py so batch.py can
+    batch any source the same way. One row per page/part: url, file, chars, status."""
+    import sqlite3
+    jd = CACHE / job
+    (jd / "pages").mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(jd / "crawl.sqlite", check_same_thread=False)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("""CREATE TABLE IF NOT EXISTS urls(
+        url TEXT PRIMARY KEY, depth INT, status TEXT, http INT, title TEXT, file TEXT,
+        chars INT, err TEXT, ts TEXT)""")
+    db.execute("CREATE INDEX IF NOT EXISTS ix_status ON urls(status, depth)")
+    db.execute("CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)")
+    db.commit()
+    return db
+
+
+def auth_header_from_env(var: str | None) -> str | None:
+    """Authorization header built from an env var, so secrets never touch disk or chat.
+
+    'Bearer x' / 'Basic x' -> used as is;  'user:token' -> Basic base64;  anything else -> Bearer.
+    """
+    if not var:
+        return None
+    val = os.environ.get(var)
+    if not val:
+        sys.exit(f"ERROR: environment variable {var} is empty or not set.")
+    if val.startswith(("Bearer ", "Basic ")):
+        return val
+    if ":" in val:
+        import base64
+        return "Basic " + base64.b64encode(val.encode()).decode()
+    return "Bearer " + val
+
+
+def write_page(job: str, key: str, title: str, text: str, meta: dict | None = None) -> tuple[str, int]:
+    """Write one markdown page with front matter; returns (relative path, chars)."""
+    import hashlib
+    f = CACHE / job / "pages" / f"{hashlib.sha1(key.encode()).hexdigest()[:16]}.md"
+    fm = {"source": key, "title": title[:200], "fetched": now_iso(), "chars": len(text), **(meta or {})}
+    head = "\n".join(f"{k}: {str(v).replace(chr(10), ' ')[:300]}" for k, v in fm.items())
+    f.write_text(f"---\n{head}\n---\n\n{text}\n", encoding="utf-8")
+    return rel(f), len(text)
+
+
+def split_text(text: str, max_chars: int) -> list[str]:
+    """Split long text into <= max_chars parts on paragraph boundaries (no silent truncation)."""
+    if len(text) <= max_chars:
+        return [text]
+    parts, cur, size = [], [], 0
+    for para in text.split("\n\n"):
+        while len(para) > max_chars:  # a single giant paragraph
+            if cur:
+                parts.append("\n\n".join(cur)); cur, size = [], 0
+            parts.append(para[:max_chars]); para = para[max_chars:]
+        if size + len(para) + 2 > max_chars and cur:
+            parts.append("\n\n".join(cur)); cur, size = [], 0
+        cur.append(para); size += len(para) + 2
+    if cur:
+        parts.append("\n\n".join(cur))
+    return parts
